@@ -7,6 +7,15 @@ const elements = {
   apiSettingsButton: document.querySelector("#apiSettingsButton"),
   apiSettingsPanel: document.querySelector("#apiSettingsPanel"),
   apiSettingsOverlay: document.querySelector("#apiSettingsOverlay"),
+  adminMenuButton: document.querySelector("#adminMenuButton"),
+  adminMenuPanel: document.querySelector("#adminMenuPanel"),
+  adminMenuOverlay: document.querySelector("#adminMenuOverlay"),
+  closeAdminMenuButton: document.querySelector("#closeAdminMenuButton"),
+  appVersionText: document.querySelector("#appVersionText"),
+  basicUsageText: document.querySelector("#basicUsageText"),
+  errorLogList: document.querySelector("#errorLogList"),
+  clearErrorLogButton: document.querySelector("#clearErrorLogButton"),
+  disableDailyLimitInput: document.querySelector("#disableDailyLimitInput"),
   personalApiNoticePanel: document.querySelector("#personalApiNoticePanel"),
   personalApiNoticeOverlay: document.querySelector("#personalApiNoticeOverlay"),
   closePersonalApiNoticeButton: document.querySelector("#closePersonalApiNoticeButton"),
@@ -66,9 +75,14 @@ const state = {
   androidRequests: new Map(),
   usePersonalApiKey: false,
   personalApiKey: "",
-  noteMode: "detailed"
+  noteMode: "simple",
+  errorLogs: [],
+  dailyLimitDisabled: false
 };
 
+const APP_VERSION = "2026.07.04-admin-menu";
+const ADMIN_PASSWORD = "gugugu117";
+const BASIC_DAILY_LIMIT = 4;
 const LOCAL_DB_NAME = "recording-ai-notes";
 const LOCAL_DB_VERSION = 1;
 const RECORD_STORE = "records";
@@ -81,6 +95,9 @@ const PERSONAL_API_KEY_STORAGE = "recording-ai-notes.personalApiKey";
 const USE_PERSONAL_API_KEY_STORAGE = "recording-ai-notes.usePersonalApiKey";
 const HIDE_PERSONAL_API_NOTICE_STORAGE = "recording-ai-notes.hidePersonalApiNotice";
 const NOTE_MODE_STORAGE = "recording-ai-notes.noteMode";
+const ERROR_LOG_STORAGE = "recording-ai-notes.errorLogs";
+const DAILY_USAGE_STORAGE = "recording-ai-notes.dailyUsage";
+const DAILY_LIMIT_DISABLED_STORAGE = "recording-ai-notes.dailyLimitDisabled";
 
 elements.startButton.addEventListener("click", startRecording);
 elements.stopButton.addEventListener("click", stopRecording);
@@ -92,6 +109,11 @@ elements.historyOverlay.addEventListener("click", closeHistory);
 elements.apiSettingsButton.addEventListener("click", openApiSettings);
 elements.closeApiSettingsButton.addEventListener("click", closeApiSettings);
 elements.apiSettingsOverlay.addEventListener("click", closeApiSettings);
+elements.adminMenuButton.addEventListener("click", openAdminMenu);
+elements.closeAdminMenuButton.addEventListener("click", closeAdminMenu);
+elements.adminMenuOverlay.addEventListener("click", closeAdminMenu);
+elements.clearErrorLogButton.addEventListener("click", clearErrorLogs);
+elements.disableDailyLimitInput.addEventListener("change", handleDailyLimitToggle);
 elements.saveApiSettingsButton.addEventListener("click", saveApiSettings);
 elements.clearApiSettingsButton.addEventListener("click", clearApiSettings);
 elements.closePersonalApiNoticeButton.addEventListener("click", closePersonalApiNotice);
@@ -136,8 +158,13 @@ window.onAndroidProcessFailed = (requestId, message) => {
 init();
 
 async function init() {
+  loadErrorLogs();
   loadNoteMode();
+  loadDailyLimitSettings();
   loadApiSettings();
+  elements.appVersionText.textContent = APP_VERSION;
+  renderBasicUsage();
+  renderErrorLogs();
   await loadHealth();
   await refreshRecords();
   updateControls();
@@ -145,7 +172,7 @@ async function init() {
 }
 
 function loadNoteMode() {
-  state.noteMode = normalizeNoteMode(localStorage.getItem(NOTE_MODE_STORAGE));
+  state.noteMode = normalizeNoteMode(localStorage.getItem(NOTE_MODE_STORAGE) || "simple");
   elements.noteModeSelect.value = state.noteMode;
 }
 
@@ -192,6 +219,11 @@ async function loadHealth() {
 
 async function startRecording() {
   if (state.recording || state.busy) {
+    return;
+  }
+
+  if (!canUseBasicFlow()) {
+    setStatus("通常ユーザーの録音・文字起こし・ノート作成は1日4回までです。管理者メニューで解除できます。");
     return;
   }
 
@@ -311,6 +343,7 @@ async function finalizeRecording() {
     const processed = await processRecording(created.id, browserTranscript);
     upsertRecord(processed);
     selectRecord(processed.id);
+    incrementBasicUsage();
     setStatus(processed.processingMessage || "完了");
   } catch (error) {
     if (error.data?.id) {
@@ -347,6 +380,12 @@ async function handleAudioFileSelected(event) {
   const file = event.target.files?.[0];
 
   if (!file || state.recording || state.busy) {
+    return;
+  }
+
+  if (!elements.adminMenuPanel.classList.contains("is-open")) {
+    event.target.value = "";
+    setStatus("音声ファイル追加は管理者メニューから行ってください。");
     return;
   }
 
@@ -406,6 +445,11 @@ function processRecording(id, browserTranscript, options = {}) {
 }
 
 async function retryTranscript() {
+  if (!elements.adminMenuPanel.classList.contains("is-open")) {
+    setStatus("再文字起こしは管理者メニューから行ってください。");
+    return;
+  }
+
   const record = selectedRecord();
 
   if (!record || state.busy) {
@@ -671,6 +715,156 @@ function closeApiSettings() {
   elements.apiSettingsPanel.classList.remove("is-open");
   elements.apiSettingsPanel.setAttribute("aria-hidden", "true");
   elements.apiSettingsOverlay.hidden = true;
+}
+
+function openAdminMenu() {
+  const password = window.prompt("管理者パスワードを入力してください。");
+
+  if (password !== ADMIN_PASSWORD) {
+    setStatus("管理者パスワードが違います。");
+    addErrorLog("管理者メニュー: パスワード認証に失敗しました。");
+    return;
+  }
+
+  elements.disableDailyLimitInput.checked = state.dailyLimitDisabled;
+  renderBasicUsage();
+  renderErrorLogs();
+  elements.adminMenuPanel.classList.add("is-open");
+  elements.adminMenuPanel.setAttribute("aria-hidden", "false");
+  elements.adminMenuOverlay.hidden = false;
+}
+
+function closeAdminMenu() {
+  elements.adminMenuPanel.classList.remove("is-open");
+  elements.adminMenuPanel.setAttribute("aria-hidden", "true");
+  elements.adminMenuOverlay.hidden = true;
+}
+
+function loadErrorLogs() {
+  try {
+    const logs = JSON.parse(localStorage.getItem(ERROR_LOG_STORAGE) || "[]");
+    state.errorLogs = Array.isArray(logs) ? logs.slice(0, 20) : [];
+  } catch {
+    state.errorLogs = [];
+  }
+}
+
+function saveErrorLogs() {
+  localStorage.setItem(ERROR_LOG_STORAGE, JSON.stringify(state.errorLogs.slice(0, 20)));
+}
+
+function addErrorLog(message) {
+  const text = cleanText(message || "");
+
+  if (!text) {
+    return;
+  }
+
+  state.errorLogs.unshift({
+    at: new Date().toISOString(),
+    message: text.slice(0, 500)
+  });
+  state.errorLogs = state.errorLogs.slice(0, 20);
+  saveErrorLogs();
+  renderErrorLogs();
+}
+
+function clearErrorLogs() {
+  state.errorLogs = [];
+  saveErrorLogs();
+  renderErrorLogs();
+}
+
+function loadDailyLimitSettings() {
+  state.dailyLimitDisabled = localStorage.getItem(DAILY_LIMIT_DISABLED_STORAGE) === "true";
+
+  if (elements.disableDailyLimitInput) {
+    elements.disableDailyLimitInput.checked = state.dailyLimitDisabled;
+  }
+}
+
+function handleDailyLimitToggle() {
+  state.dailyLimitDisabled = elements.disableDailyLimitInput.checked;
+  localStorage.setItem(DAILY_LIMIT_DISABLED_STORAGE, state.dailyLimitDisabled ? "true" : "false");
+  setStatus(state.dailyLimitDisabled ? "通常ユーザーの1日4回制限を解除しました。" : "通常ユーザーの1日4回制限を有効にしました。");
+  renderBasicUsage();
+  updateControls();
+}
+
+function readDailyUsage() {
+  try {
+    const usage = JSON.parse(localStorage.getItem(DAILY_USAGE_STORAGE) || "{}");
+    return usage && typeof usage === "object" ? usage : {};
+  } catch {
+    return {};
+  }
+}
+
+function basicUsageCount() {
+  const usage = readDailyUsage();
+  return Number(usage[todayKey()] || 0);
+}
+
+function basicUsageRemaining() {
+  if (state.dailyLimitDisabled) {
+    return Infinity;
+  }
+
+  return Math.max(0, BASIC_DAILY_LIMIT - basicUsageCount());
+}
+
+function canUseBasicFlow() {
+  return state.dailyLimitDisabled || basicUsageCount() < BASIC_DAILY_LIMIT;
+}
+
+function incrementBasicUsage() {
+  if (state.dailyLimitDisabled) {
+    return;
+  }
+
+  const usage = readDailyUsage();
+  const key = todayKey();
+  usage[key] = Number(usage[key] || 0) + 1;
+  localStorage.setItem(DAILY_USAGE_STORAGE, JSON.stringify(usage));
+  renderBasicUsage();
+}
+
+function renderBasicUsage() {
+  if (!elements.basicUsageText) {
+    return;
+  }
+
+  elements.basicUsageText.textContent = state.dailyLimitDisabled
+    ? "制限解除中"
+    : `${basicUsageRemaining()} / ${BASIC_DAILY_LIMIT} 回`;
+}
+
+function renderErrorLogs() {
+  if (!elements.errorLogList) {
+    return;
+  }
+
+  elements.errorLogList.innerHTML = "";
+
+  if (!state.errorLogs.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-log";
+    empty.textContent = "エラーはまだありません。";
+    elements.errorLogList.append(empty);
+    return;
+  }
+
+  for (const log of state.errorLogs) {
+    const item = document.createElement("div");
+    item.className = "error-log-item";
+    const time = document.createElement("span");
+    time.className = "error-log-time";
+    time.textContent = formatDate(log.at);
+    const body = document.createElement("p");
+    body.textContent = log.message;
+    item.append(time, body);
+    elements.errorLogList.append(item);
+  }
 }
 
 function saveApiSettings() {
@@ -1030,20 +1224,21 @@ function currentTranscript() {
 
 function updateControls() {
   const record = selectedRecord();
-  elements.startButton.disabled = state.recording || state.busy;
+  const basicLimitReached = !state.dailyLimitDisabled && basicUsageCount() >= BASIC_DAILY_LIMIT;
+  elements.startButton.disabled = state.recording || state.busy || basicLimitReached;
+  elements.startButton.title = basicLimitReached
+    ? "通常ユーザーの録音・文字起こし・ノート作成は1日4回までです"
+    : state.dailyLimitDisabled
+      ? "1日4回制限は解除中です"
+      : `今日の残り${basicUsageRemaining()}回`;
   elements.stopButton.disabled = !state.recording;
   elements.audioFileInput.disabled = state.recording || state.busy;
   elements.saveNoteButton.disabled = state.recording || state.busy || !state.selectedId;
   elements.copyNoteButton.disabled = !elements.noteArea.value.trim();
-  const retryRemaining =
-    typeof record?.retryTranscriptRemaining === "number" ? record.retryTranscriptRemaining : 3;
-  elements.retryTranscriptButton.disabled =
-    state.recording || state.busy || !record?.hasAudio || retryRemaining <= 0;
+  elements.retryTranscriptButton.disabled = state.recording || state.busy || !record?.hasAudio;
   elements.retryTranscriptButton.title = !record?.hasAudio
     ? "音声ファイルが残っていません"
-    : retryRemaining <= 0
-      ? "再文字起こしは1日3回までです"
-      : `同じ音声をもう一度文字起こしします。今日の残り${retryRemaining}回`;
+    : "管理者メニューから同じ音声をもう一度文字起こしします";
   elements.exportPdfButton.disabled =
     state.busy || (!elements.noteArea.value.trim() && !elements.transcriptArea.value.trim());
   elements.exportFilesButton.hidden = !state.exportEnabled;
@@ -1196,12 +1391,7 @@ async function processLocalRecording(id, browserTranscript, options = {}) {
   }
 
   if (options.retryTranscript) {
-    const retryCheck = consumeRetryAttempt(record);
-
-    if (!retryCheck.ok) {
-      await writeStore(db, RECORD_STORE, record);
-      throw new Error("再文字起こしは1日3回までです。明日また試してください。");
-    }
+    record.retryTranscriptRemaining = Infinity;
   }
 
   record.status = "processing";
@@ -1619,6 +1809,7 @@ async function api(path, options = {}) {
       options.body instanceof Blob && options.body.size > LARGE_AUDIO_WARNING_BYTES
         ? "音声が長すぎるため送信に失敗しました。短く分けるか、新しく録音する場合はこの版で録音し直してください。"
         : error.message || "通信に失敗しました。";
+    addErrorLog(message);
     throw new Error(message);
   }
 
@@ -1635,6 +1826,7 @@ async function api(path, options = {}) {
     const error = new Error(data.error || data.processingMessage || "処理に失敗しました。");
     error.status = response.status;
     error.data = data;
+    addErrorLog(error.message);
     throw error;
   }
 

@@ -22,10 +22,11 @@
             <option value="zh-CN">中文</option>
           </select>
           <select id="noteModeSelect" class="select-input" aria-label="ノート形式">
+            <option value="simple" selected>簡易ノート</option>
             <option value="detailed">詳細ノート</option>
-            <option value="simple">簡易ノート</option>
           </select>
           <button id="apiSettingsButton" class="ghost-button" type="button">API設定</button>
+          <button id="adminMenuButton" class="ghost-button" type="button">管理者</button>
           <button id="historyButton" class="ghost-button" type="button">履歴</button>
         </div>
       </header>
@@ -40,10 +41,7 @@
           <button id="startButton" class="primary-button" type="button">録音開始</button>
           <button id="stopButton" class="danger-button" type="button" disabled>停止</button>
         </div>
-        <div class="mobile-actions">
-          <label class="file-button" for="audioFileInput">音声ファイルを追加</label>
-          <input id="audioFileInput" class="file-input" type="file" accept="audio/*" capture>
-        </div>
+        <input id="audioFileInput" class="file-input" type="file" accept="audio/*" capture>
       </section>
 
       <main class="workspace">
@@ -66,7 +64,6 @@
             </div>
             <div class="selected-actions">
               <button id="copyNoteButton" class="secondary-button" type="button">ノートをコピー</button>
-              <button id="retryTranscriptButton" class="ghost-button" type="button">再文字起こし</button>
               <button id="exportPdfButton" class="ghost-button" type="button">PDF出力</button>
               <button id="exportFilesButton" class="ghost-button" type="button" hidden>ファイル書き出し</button>
               <button id="saveNoteButton" class="ghost-button" type="button">履歴に保存</button>
@@ -90,6 +87,7 @@
     </div>
     <div id="historyOverlay" class="history-overlay" hidden></div>
     <div id="apiSettingsOverlay" class="history-overlay" hidden></div>
+    <div id="adminMenuOverlay" class="history-overlay" hidden></div>
     <div id="personalApiNoticeOverlay" class="history-overlay" hidden></div>
     <section id="personalApiNoticePanel" class="settings-panel notice-panel" aria-label="個人APIキーのお願い" aria-hidden="true">
       <div class="panel-heading">
@@ -132,6 +130,38 @@
       </div>
     </section>
 
+    <section id="adminMenuPanel" class="settings-panel" aria-label="管理者メニュー" aria-hidden="true">
+      <div class="panel-heading">
+        <h2>管理者メニュー</h2>
+        <button id="closeAdminMenuButton" class="ghost-button compact-button" type="button">閉じる</button>
+      </div>
+      <div class="settings-body">
+        <div class="admin-info-row">
+          <span>バージョン</span>
+          <strong id="appVersionText">-</strong>
+        </div>
+        <div class="admin-info-row">
+          <span>通常機能の本日残り</span>
+          <strong id="basicUsageText">-</strong>
+        </div>
+        <div class="settings-actions">
+          <label class="file-button" for="audioFileInput">音声ファイルを追加</label>
+          <button id="retryTranscriptButton" class="ghost-button" type="button">再文字起こし</button>
+        </div>
+        <label class="switch-row">
+          <input id="disableDailyLimitInput" type="checkbox">
+          <span>通常ユーザーの1日4回制限を外す</span>
+        </label>
+        <div class="admin-log">
+          <div class="admin-log-heading">
+            <span>簡単なエラーログ</span>
+            <button id="clearErrorLogButton" class="ghost-button compact-button" type="button">消去</button>
+          </div>
+          <div id="errorLogList" class="error-log-list"></div>
+        </div>
+      </div>
+    </section>
+
     <template id="recordItemTemplate">
       <div class="record-item">
         <button class="record-open" type="button">
@@ -143,6 +173,6 @@
       </div>
     </template>
 
-    <script src="app.js?v=11"></script>
+    <script src="app.js?v=14"></script>
   </body>
 </html>

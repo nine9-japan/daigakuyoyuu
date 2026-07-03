@@ -377,6 +377,68 @@ textarea:focus {
   flex-wrap: wrap;
 }
 
+.admin-info-row {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--muted);
+}
+
+.admin-info-row strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.admin-log {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-log-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 700;
+}
+
+.error-log-list {
+  display: grid;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.empty-log,
+.error-log-item {
+  padding: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.error-log-item + .error-log-item {
+  border-top: 1px solid var(--line);
+}
+
+.error-log-time {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.error-log-item p {
+  margin: 0;
+  word-break: break-word;
+}
+
 .panel-actions {
   display: flex;
   gap: 8px;

@@ -32,7 +32,7 @@ AUDIO_DIR = DATA_DIR / "recordings"
 RECORDS_FILE = DATA_DIR / "recordings.json"
 RETENTION_DAYS = 7
 RETENTION = timedelta(days=RETENTION_DAYS)
-RETRY_TRANSCRIPT_DAILY_LIMIT = 3
+RETRY_TRANSCRIPT_DAILY_LIMIT = 1000000
 MAX_AUDIO_BYTES = 512 * 1024 * 1024
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_REMOTE_AI_JSON_BYTES = 150 * 1024 * 1024
@@ -992,6 +992,7 @@ def detailed_note_rules() -> str:
     return "\n".join(
         [
             "ノート形式: 詳細",
+            "文字数: 日本語で3000〜5000文字を目安にしてください。短くまとめすぎず、授業後に読み返して内容を復元できる密度にしてください。",
             "次の形式と雰囲気を必ず参考にしてください。",
             "",
             "# タイトル",
@@ -1064,10 +1065,16 @@ def simple_note_rules() -> str:
 
 def summarize_with_openai(transcript: str, api_key: str, note_mode: str = "detailed") -> str:
     mode_rules = detailed_note_rules() if note_mode == "detailed" else simple_note_rules()
+    length_rule = (
+        "詳細ノートなので、日本語で3000〜5000文字を目安にしてください。短くまとめすぎず、背景・流れ・重要語句・結果・意義まで丁寧に整理してください。"
+        if note_mode == "detailed"
+        else "簡易ノートなので、今まで通り短めにしてください。目安は500〜1200文字です。"
+    )
     prompt = "\n".join(
         [
             "次の文字起こしを、授業用の日本語ノートとして整理してください。",
             mode_rules,
+            length_rule,
             "",
             "共通ルール:",
             "* 会話や雑談は要点に変換する",
@@ -1081,6 +1088,7 @@ def summarize_with_openai(transcript: str, api_key: str, note_mode: str = "detai
     payload = json.dumps(
         {
             "model": os.environ.get("OPENAI_NOTE_MODEL", "gpt-4o-mini"),
+            "max_output_tokens": 7000 if note_mode == "detailed" else 2000,
             "input": [
                 {
                     "role": "system",
