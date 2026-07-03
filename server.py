@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import json
+import io
+import base64
 import mimetypes
 import os
 import ipaddress
 import re
 import shutil
 import socket
+import subprocess
+import sys
 import threading
 import time
+import textwrap
 import uuid
+import webbrowser
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,8 +23,9 @@ from pathlib import Path
 from urllib import error, parse, request
 
 
-ROOT_DIR = Path(__file__).resolve().parent
-PUBLIC_DIR = ROOT_DIR / "public"
+ROOT_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", ROOT_DIR))
+PUBLIC_DIR = RESOURCE_DIR / "public"
 DATA_DIR = ROOT_DIR / "data"
 AUDIO_DIR = DATA_DIR / "recordings"
 RECORDS_FILE = DATA_DIR / "recordings.json"
@@ -26,6 +33,7 @@ RETENTION_DAYS = 7
 RETENTION = timedelta(days=RETENTION_DAYS)
 MAX_AUDIO_BYTES = 100 * 1024 * 1024
 MAX_JSON_BYTES = 2 * 1024 * 1024
+MAX_REMOTE_AI_JSON_BYTES = 150 * 1024 * 1024
 
 
 class RequestHandled(Exception):
@@ -39,14 +47,101 @@ def main() -> None:
 
     threading.Thread(target=cleanup_loop, daemon=True).start()
 
-    host = os.environ.get("HOST", "0.0.0.0")
+    if should_run_desktop_window():
+        run_desktop_window()
+        return
+
+    run_http_server()
+
+
+def run_http_server() -> None:
+    host = os.environ.get("HOST", "127.0.0.1" if is_frozen_app() else "0.0.0.0")
     port = int(os.environ.get("PORT", "5177"))
-    server = ThreadingHTTPServer((host, port), AppHandler)
-    urls = access_urls(host, port)
+    server = create_http_server(host, port, allow_port_fallback=is_frozen_app())
+    urls = access_urls(str(server.server_address[0]), int(server.server_address[1]))
     print(f"Recording AI Notes is running at {urls['local']}", flush=True)
-    for url in urls["network"]:
-        print(f"Phone URL: {url}", flush=True)
+    should_open_browser = os.environ.get("OPEN_BROWSER", "1" if is_frozen_app() else "").strip()
+    if should_open_browser == "1":
+        threading.Timer(0.8, lambda: webbrowser.open(urls["local"])).start()
     server.serve_forever()
+
+
+def run_desktop_window() -> None:
+    os.environ.setdefault("APP_VARIANT", "windows")
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "5177"))
+    server = create_http_server(host, port, allow_port_fallback=True)
+    urls = access_urls(str(server.server_address[0]), int(server.server_address[1]))
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    try:
+        if launch_app_window(urls["local"]):
+            return
+
+        raise RuntimeError("アプリ表示に使えるEdge/Chromeが見つかりません。")
+    except Exception as exc:
+        print(f"App window failed: {exc}", flush=True)
+        webbrowser.open(urls["local"])
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def launch_app_window(url: str) -> bool:
+    browser_path = find_desktop_browser()
+
+    if not browser_path:
+        return False
+
+    profile_dir = ROOT_DIR / "browser-profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    process = subprocess.Popen(
+        [
+            str(browser_path),
+            f"--app={url}",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--disable-features=Translate",
+            "--autoplay-policy=no-user-gesture-required",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    process.wait()
+    return True
+
+
+def find_desktop_browser() -> Path | None:
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(os.environ.get("PROGRAMFILES", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+    ]
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    return None
+
+
+def create_http_server(host: str, port: int, allow_port_fallback: bool = False) -> ThreadingHTTPServer:
+    try:
+        return ThreadingHTTPServer((host, port), AppHandler)
+    except OSError:
+        if not allow_port_fallback:
+            raise
+
+        return ThreadingHTTPServer((host, 0), AppHandler)
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -62,6 +157,9 @@ class AppHandler(BaseHTTPRequestHandler):
         self.route()
 
     def do_PATCH(self) -> None:
+        self.route()
+
+    def do_DELETE(self) -> None:
         self.route()
 
     def log_message(self, format: str, *args: object) -> None:
@@ -91,7 +189,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "retentionDays": RETENTION_DAYS,
-                    "aiEnabled": has_openai_key(),
+                    "aiEnabled": has_admin_ai(),
+                    "remoteAdminEnabled": has_remote_admin(),
+                    "appVariant": app_variant(),
+                    "historyEnabled": history_enabled(),
+                    "exportEnabled": export_enabled(),
+                    "storagePath": str(DATA_DIR.resolve()) if export_enabled() else "",
                     "localUrl": urls["local"],
                     "networkUrls": urls["network"],
                 }
@@ -107,9 +210,22 @@ class AppHandler(BaseHTTPRequestHandler):
             self.create_recording(url)
             return
 
+        if url.path == "/api/pdf" and self.command == "POST":
+            self.create_pdf()
+            return
+
+        if url.path == "/api/ai/process" and self.command == "POST":
+            self.process_remote_ai()
+            return
+
         process_match = re.fullmatch(r"/api/recordings/([^/]+)/process", url.path)
         if process_match and self.command == "POST":
             self.process_recording(process_match.group(1))
+            return
+
+        export_match = re.fullmatch(r"/api/recordings/([^/]+)/export", url.path)
+        if export_match and self.command == "POST":
+            self.export_recording(export_match.group(1))
             return
 
         audio_match = re.fullmatch(r"/api/recordings/([^/]+)/audio", url.path)
@@ -120,6 +236,10 @@ class AppHandler(BaseHTTPRequestHandler):
         record_match = re.fullmatch(r"/api/recordings/([^/]+)", url.path)
         if record_match and self.command == "PATCH":
             self.update_recording(record_match.group(1))
+            return
+
+        if record_match and self.command == "DELETE":
+            self.delete_recording(record_match.group(1))
             return
 
         self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
@@ -177,11 +297,23 @@ class AppHandler(BaseHTTPRequestHandler):
         warnings: list[str] = []
         transcript = clean_text(payload.get("browserTranscript") or record.get("transcript") or "")
         transcript_source = "browser" if transcript else None
+        note_mode = clean_note_mode(payload.get("noteMode") or record.get("noteMode"))
+        note = ""
         api_key = request_api_key(payload)
         has_api_key = bool(api_key)
         key_source = "user" if clean_text(payload.get("userApiKey")) else "admin"
 
-        if has_api_key and record.get("audioFileName"):
+        if should_use_remote_admin(payload):
+            try:
+                remote = process_with_remote_admin(record, transcript, note_mode)
+                transcript = clean_text(remote.get("transcript") or transcript)
+                note = clean_text(remote.get("note") or "")
+                transcript_source = remote.get("transcriptSource") or "openai"
+                note_source = remote.get("noteSource") or "openai"
+                key_source = "remote-admin"
+            except Exception as exc:
+                warnings.append(f"管理者AIサーバー: {exc}")
+        elif has_api_key and record.get("audioFileName"):
             try:
                 transcript = clean_text(transcribe_with_openai(record, api_key))
                 transcript_source = "openai"
@@ -197,20 +329,23 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json(public_record(record), HTTPStatus.UNPROCESSABLE_ENTITY)
             return
 
-        note_source = "local"
+        note_source = "openai" if note else "local"
 
-        if has_api_key:
+        if note:
+            pass
+        elif has_api_key:
             try:
-                note = clean_text(summarize_with_openai(transcript, api_key))
+                note = clean_text(summarize_with_openai(transcript, api_key, note_mode))
                 note_source = "openai"
             except Exception as exc:
                 warnings.append(f"ノート生成API: {exc}")
-                note = make_fallback_note(transcript, "AIノート生成に失敗したため、簡易ノートを作成しました。")
+                note = make_fallback_note(transcript, "AIノート生成に失敗したため、簡易ノートを作成しました。", note_mode)
         else:
-            note = make_fallback_note(transcript, "OpenAI APIキー未設定のため、簡易ノートを作成しました。")
+            note = make_fallback_note(transcript, "OpenAI APIキー未設定のため、簡易ノートを作成しました。", note_mode)
 
         record["transcript"] = transcript
         record["note"] = note
+        record["noteMode"] = note_mode
         record["status"] = "ready"
         record["processedAt"] = iso(utc_now())
         record["transcriptSource"] = transcript_source
@@ -220,6 +355,54 @@ class AppHandler(BaseHTTPRequestHandler):
 
         write_records(records)
         self.send_json(public_record(record))
+
+    def process_remote_ai(self) -> None:
+        if not authorized_remote_ai_request(self.headers.get("Authorization")):
+            self.send_json({"error": "管理者AIサーバーの認証に失敗しました。"}, HTTPStatus.UNAUTHORIZED)
+            return
+
+        payload = self.read_json(MAX_REMOTE_AI_JSON_BYTES)
+        api_key = request_api_key(payload)
+
+        if not api_key:
+            self.send_json({"error": "管理者APIキーが未設定です。"}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+
+        transcript = clean_text(payload.get("browserTranscript") or "")
+        transcript_source = "browser" if transcript else None
+        note_mode = clean_note_mode(payload.get("noteMode"))
+        audio_base64 = clean_text(payload.get("audioBase64") or "")
+
+        if audio_base64:
+            try:
+                audio_bytes = base64.b64decode(audio_base64, validate=True)
+                filename = clean_title(str(payload.get("audioFileName") or "recording.webm")) or "recording.webm"
+                audio_mime = normalize_mime(str(payload.get("audioMime") or "audio/webm"))
+                transcript = clean_text(transcribe_audio_bytes(filename, audio_mime, audio_bytes, api_key))
+                transcript_source = "openai"
+            except Exception as exc:
+                self.send_json({"error": f"文字起こしAPI: {exc}"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                return
+
+        if not transcript:
+            self.send_json({"error": "文字起こしが空です。"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+            return
+
+        try:
+            note = clean_text(summarize_with_openai(transcript, api_key, note_mode))
+        except Exception as exc:
+            self.send_json({"error": f"ノート生成API: {exc}"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+            return
+
+        self.send_json(
+            {
+                "transcript": transcript,
+                "note": note,
+                "noteMode": note_mode,
+                "transcriptSource": transcript_source or "openai",
+                "noteSource": "openai",
+            }
+        )
 
     def update_recording(self, recording_id: str) -> None:
         payload = self.read_json(MAX_JSON_BYTES)
@@ -239,9 +422,64 @@ class AppHandler(BaseHTTPRequestHandler):
         if isinstance(payload.get("note"), str):
             record["note"] = clean_text(payload["note"])
 
+        if isinstance(payload.get("noteMode"), str):
+            record["noteMode"] = clean_note_mode(payload["noteMode"])
+
         record["updatedAt"] = iso(utc_now())
         write_records(records)
         self.send_json(public_record(record))
+
+    def delete_recording(self, recording_id: str) -> None:
+        records = cleanup_expired_audio()
+        record = find_record(records, recording_id)
+
+        if not record:
+            self.send_json({"error": "録音が見つかりません。"}, HTTPStatus.NOT_FOUND)
+            return
+
+        audio_file_name = record.get("audioFileName")
+        if audio_file_name:
+            remove_audio_file(AUDIO_DIR / Path(audio_file_name).name)
+
+        records = [item for item in records if item.get("id") != recording_id]
+        write_records(records)
+        self.send_json({"ok": True, "id": recording_id})
+
+    def create_pdf(self) -> None:
+        payload = self.read_json(MAX_JSON_BYTES)
+
+        try:
+            pdf = build_note_pdf(payload)
+        except MissingPdfLibrary as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        title = clean_title(str(payload.get("title") or "録音ノート")) or "録音ノート"
+        self.send_binary(
+            pdf,
+            "application/pdf",
+            f"{safe_path_part(title)}.pdf",
+        )
+
+    def export_recording(self, recording_id: str) -> None:
+        if not export_enabled():
+            self.send_json({"error": "Web版ではファイル保存を使えません。"}, HTTPStatus.FORBIDDEN)
+            return
+
+        records = cleanup_expired_audio()
+        record = find_record(records, recording_id)
+
+        if not record:
+            self.send_json({"error": "録音が見つかりません。"}, HTTPStatus.NOT_FOUND)
+            return
+
+        export_path = write_record_export(record)
+        self.send_json(
+            {
+                "ok": True,
+                "path": str(export_path.resolve()),
+            }
+        )
 
     def serve_audio(self, recording_id: str, head_only: bool) -> None:
         records = cleanup_expired_audio()
@@ -340,18 +578,136 @@ class AppHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def send_binary(self, body: bytes, content_type: str, filename: str) -> None:
+        encoded_name = parse.quote(filename)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header(
+            "Content-Disposition",
+            f"attachment; filename=\"note.pdf\"; filename*=UTF-8''{encoded_name}",
+        )
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+
+class MissingPdfLibrary(Exception):
+    pass
+
+
+def build_note_pdf(payload: dict) -> bytes:
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+        from reportlab.pdfgen import canvas
+    except Exception as exc:
+        raise MissingPdfLibrary(
+            "PDF生成ライブラリがありません。requirements.txt の reportlab を入れてください。"
+        ) from exc
+
+    register_pdf_font(pdfmetrics, UnicodeCIDFont, "HeiseiMin-W3")
+    register_pdf_font(pdfmetrics, UnicodeCIDFont, "HeiseiKakuGo-W5")
+
+    title = clean_title(str(payload.get("title") or "録音ノート")) or "録音ノート"
+    created_at = clean_text(payload.get("createdAt") or "")
+    note = clean_text(payload.get("note") or "")
+    transcript = clean_text(payload.get("transcript") or "")
+    note_mode = clean_note_mode(payload.get("noteMode"))
+    note_mode_label = "詳細" if note_mode == "detailed" else "簡易"
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    margin = 42
+    y = height - margin
+
+    def ensure_space(required: int = 18) -> None:
+        nonlocal y
+        if y >= margin + required:
+            return
+
+        pdf.showPage()
+        y = height - margin
+
+    def draw_wrapped(text: str, font: str = "HeiseiMin-W3", size: int = 10, leading: int = 15, indent: int = 0) -> None:
+        nonlocal y
+        available_width = width - margin * 2 - indent
+        max_chars = max(18, int(available_width / max(size * 0.58, 1)))
+        raw_lines = str(text or "").splitlines() or [""]
+        pdf.setFont(font, size)
+
+        for raw in raw_lines:
+            if not raw.strip():
+                ensure_space(leading)
+                y -= leading
+                continue
+
+            chunks = textwrap.wrap(
+                raw,
+                width=max_chars,
+                break_long_words=True,
+                replace_whitespace=False,
+                drop_whitespace=False,
+            ) or [raw]
+
+            for chunk in chunks:
+                ensure_space(leading)
+                pdf.drawString(margin + indent, y, chunk)
+                y -= leading
+
+    def draw_section_heading(label: str) -> None:
+        nonlocal y
+        ensure_space(28)
+        y -= 6
+        pdf.setFont("HeiseiKakuGo-W5", 13)
+        pdf.drawString(margin, y, label)
+        y -= 8
+        pdf.line(margin, y, width - margin, y)
+        y -= 14
+
+    pdf.setTitle(title)
+    pdf.setAuthor("録音ノート")
+    pdf.setFont("HeiseiKakuGo-W5", 18)
+    pdf.drawString(margin, y, title)
+    y -= 24
+    pdf.setFont("HeiseiMin-W3", 9)
+    pdf.drawString(margin, y, f"{created_at} / ノート形式: {note_mode_label}".strip(" /"))
+    y -= 18
+
+    draw_section_heading("AIノート")
+    draw_wrapped(note or "ノートはまだありません。")
+
+    draw_section_heading("文字起こし")
+    draw_wrapped(transcript or "文字起こしはまだありません。")
+
+    pdf.save()
+    return buffer.getvalue()
+
 
 def transcribe_with_openai(record: dict, api_key: str) -> str:
     audio_path = AUDIO_DIR / Path(record["audioFileName"]).name
+    return transcribe_audio_bytes(
+        record["audioFileName"],
+        record.get("audioMime") or "audio/webm",
+        audio_path.read_bytes(),
+        api_key,
+    )
+
+
+def transcribe_audio_bytes(filename: str, audio_mime: str, audio_bytes: bytes, api_key: str) -> str:
     fields = {
         "model": os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe"),
         "response_format": "json",
     }
     files = {
         "file": (
-            record["audioFileName"],
-            record.get("audioMime") or "audio/webm",
-            audio_path.read_bytes(),
+            Path(filename).name or "recording.webm",
+            normalize_mime(audio_mime),
+            audio_bytes,
         )
     }
     data, content_type = encode_multipart(fields, files)
@@ -364,10 +720,39 @@ def transcribe_with_openai(record: dict, api_key: str) -> str:
     return str(response.get("text") or "")
 
 
-def summarize_with_openai(transcript: str, api_key: str) -> str:
-    prompt = "\n".join(
+def process_with_remote_admin(record: dict, browser_transcript: str, note_mode: str) -> dict:
+    base_url = remote_admin_base()
+
+    if not base_url:
+        raise RuntimeError("ADMIN_API_BASE が未設定です。")
+
+    payload = {
+        "browserTranscript": browser_transcript,
+        "noteMode": note_mode,
+        "audioMime": record.get("audioMime") or "audio/webm",
+        "audioFileName": record.get("audioFileName") or "recording.webm",
+    }
+
+    audio_file_name = record.get("audioFileName")
+    if audio_file_name:
+        audio_path = AUDIO_DIR / Path(audio_file_name).name
+        if audio_path.exists():
+            payload["audioBase64"] = base64.b64encode(audio_path.read_bytes()).decode("ascii")
+
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    endpoint = f"{base_url}/api/ai/process"
+    response = url_json_request(endpoint, body, "application/json")
+
+    if not isinstance(response, dict):
+        raise RuntimeError("管理者AIサーバーの応答を読めませんでした。")
+
+    return response
+
+
+def detailed_note_rules() -> str:
+    return "\n".join(
         [
-            "次の文字起こしを、授業用の日本語ノートとして整理してください。",
+            "ノート形式: 詳細",
             "次の形式と雰囲気を必ず参考にしてください。",
             "",
             "# タイトル",
@@ -401,9 +786,51 @@ def summarize_with_openai(transcript: str, api_key: str) -> str:
             "2. 結果",
             "3. 意義",
             "",
-            "ルール:",
+            "詳細ルール:",
             "* 見出し番号は内容に合わせて増減する",
             "* 歴史・社会・理科などの授業なら、背景、方法、結果、意義を優先する",
+            "* 復習に必要な説明を省略しすぎない",
+        ]
+    )
+
+
+def simple_note_rules() -> str:
+    return "\n".join(
+        [
+            "ノート形式: 簡易",
+            "短く読み返せる要点ノートにしてください。",
+            "",
+            "# タイトル",
+            "",
+            "## 要点",
+            "",
+            "* 重要な内容を5〜8個に絞る",
+            "* 重要語句は **太字** にする",
+            "",
+            "## 重要語句",
+            "",
+            "* 用語: 意味を短く",
+            "",
+            "## まとめ",
+            "",
+            "* 最後に全体を2〜3行でまとめる",
+            "",
+            "簡易ルール:",
+            "* 細かい背景説明は必要最小限にする",
+            "* 長い章立てにしない",
+            "* 重要な用語と結論を優先する",
+        ]
+    )
+
+
+def summarize_with_openai(transcript: str, api_key: str, note_mode: str = "detailed") -> str:
+    mode_rules = detailed_note_rules() if note_mode == "detailed" else simple_note_rules()
+    prompt = "\n".join(
+        [
+            "次の文字起こしを、授業用の日本語ノートとして整理してください。",
+            mode_rules,
+            "",
+            "共通ルール:",
             "* 会話や雑談は要点に変換する",
             "* 文字起こしにないことは推測で断定しない",
             "* TODO形式ではなく、復習しやすい学習ノートにする",
@@ -471,6 +898,38 @@ def openai_request(url: str, api_key: str, data: bytes, content_type: str) -> di
     return json.loads(body or "{}")
 
 
+def url_json_request(url: str, data: bytes, content_type: str) -> dict:
+    headers = {"Content-Type": content_type}
+    token = admin_api_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    req = request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers=headers,
+    )
+
+    try:
+        with request.urlopen(req, timeout=180) as res:
+            body = res.read().decode("utf-8")
+    except error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(body)
+            message = parsed.get("error") or parsed.get("processingMessage") or body
+        except json.JSONDecodeError:
+            message = body
+        raise RuntimeError(message) from exc
+
+    try:
+        parsed = json.loads(body or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("JSON応答ではありません。") from exc
+
+
 def encode_multipart(fields: dict[str, str], files: dict[str, tuple[str, str, bytes]]) -> tuple[bytes, str]:
     boundary = f"----recording-ai-notes-{uuid.uuid4().hex}"
     body = bytearray()
@@ -495,11 +954,32 @@ def encode_multipart(fields: dict[str, str], files: dict[str, tuple[str, str, by
     return bytes(body), f"multipart/form-data; boundary={boundary}"
 
 
-def make_fallback_note(transcript: str, reason: str) -> str:
+def make_fallback_note(transcript: str, reason: str, note_mode: str = "detailed") -> str:
     normalized = re.sub(r"\s+", " ", transcript).strip()
     sentences = [item.strip() for item in re.split(r"(?<=[。.!?！？])\s*", normalized) if item.strip()]
     highlights = sentences[:6] or ["文字起こしを確認してください。"]
     keywords = extract_keywords(normalized)
+
+    if note_mode == "simple":
+        lines = [
+            "# 講義ノート",
+            "",
+            "## 要点",
+            "",
+        ]
+        lines.extend(f"* {item}" for item in highlights[:5])
+        lines.extend(["", "## 重要語句", ""])
+        lines.extend(f"* **{item}**" for item in keywords[:6] or ["なし"])
+        lines.extend(
+            [
+                "",
+                "## まとめ",
+                "",
+                "* 文字起こしから主要な内容を短く整理しました。",
+                f"* {reason}",
+            ]
+        )
+        return "\n".join(lines)
 
     lines = [
         "# 講義ノート",
@@ -674,6 +1154,73 @@ def ensure_storage() -> None:
         write_records([])
 
 
+def app_variant() -> str:
+    configured = os.environ.get("APP_VARIANT", "").strip().lower()
+
+    if configured in {"web", "windows"}:
+        return configured
+
+    if is_frozen_app():
+        return "windows"
+
+    if os.environ.get("RENDER"):
+        return "web"
+
+    return "web"
+
+
+def is_frozen_app() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def should_run_desktop_window() -> bool:
+    if not is_frozen_app():
+        return False
+
+    return os.environ.get("APP_WINDOW", "1").strip() == "1"
+
+
+def history_enabled() -> bool:
+    return app_variant() == "windows"
+
+
+def export_enabled() -> bool:
+    return app_variant() == "windows"
+
+
+def write_record_export(record: dict) -> Path:
+    created_at = parse_iso(record.get("createdAt")) or utc_now()
+    folder_name = safe_path_part(
+        f"{created_at.astimezone():%Y%m%d-%H%M}-{record.get('title') or '録音ノート'}"
+    )
+    export_dir = DATA_DIR / "exports" / folder_name
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    transcript = clean_text(record.get("transcript") or "")
+    note = clean_text(record.get("note") or "")
+
+    (export_dir / "文字起こし.txt").write_text(transcript + "\n", encoding="utf-8")
+    (export_dir / "AIノート.md").write_text(note + "\n", encoding="utf-8")
+    (export_dir / "record.json").write_text(
+        json.dumps(public_record(record), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    audio_file_name = record.get("audioFileName")
+    if audio_file_name:
+        source = AUDIO_DIR / Path(audio_file_name).name
+        if source.exists() and source.stat().st_size:
+            shutil.copy2(source, export_dir / f"録音.{extension_for_mime(record.get('audioMime'))}")
+
+    return export_dir
+
+
+def safe_path_part(value: str) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", value)
+    cleaned = re.sub(r"\s+", "_", cleaned).strip("._ ")
+    return cleaned[:120] or "録音ノート"
+
+
 def read_records() -> list[dict]:
     if not RECORDS_FILE.exists():
         return []
@@ -724,6 +1271,38 @@ def has_openai_key() -> bool:
     return bool(os.environ.get("OPENAI_API_KEY", "").strip())
 
 
+def has_remote_admin() -> bool:
+    return bool(remote_admin_base())
+
+
+def has_admin_ai() -> bool:
+    return has_openai_key() or has_remote_admin()
+
+
+def remote_admin_base() -> str:
+    return os.environ.get("ADMIN_API_BASE", "").strip().rstrip("/")
+
+
+def admin_api_token() -> str:
+    return os.environ.get("ADMIN_API_TOKEN", "").strip()
+
+
+def authorized_remote_ai_request(header: str | None) -> bool:
+    token = admin_api_token()
+
+    if not token:
+        return True
+
+    return str(header or "").strip() == f"Bearer {token}"
+
+
+def should_use_remote_admin(payload: dict) -> bool:
+    if clean_api_key(payload.get("userApiKey")):
+        return False
+
+    return bool(remote_admin_base())
+
+
 def request_api_key(payload: dict) -> str:
     user_api_key = clean_api_key(payload.get("userApiKey"))
 
@@ -735,6 +1314,17 @@ def request_api_key(payload: dict) -> str:
 
 def clean_api_key(value: object) -> str:
     return str(value or "").strip()[:300]
+
+
+def clean_note_mode(value: object) -> str:
+    return "simple" if str(value or "").strip().lower() == "simple" else "detailed"
+
+
+def register_pdf_font(pdfmetrics: object, UnicodeCIDFont: object, font_name: str) -> None:
+    try:
+        pdfmetrics.getFont(font_name)
+    except KeyError:
+        pdfmetrics.registerFont(UnicodeCIDFont(font_name))
 
 
 def clean_title(value: str | None) -> str:

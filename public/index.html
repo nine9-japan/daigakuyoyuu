@@ -21,6 +21,10 @@
             <option value="ko-KR">한국어</option>
             <option value="zh-CN">中文</option>
           </select>
+          <select id="noteModeSelect" class="select-input" aria-label="ノート形式">
+            <option value="detailed">詳細ノート</option>
+            <option value="simple">簡易ノート</option>
+          </select>
           <button id="apiSettingsButton" class="ghost-button" type="button">API設定</button>
           <button id="historyButton" class="ghost-button" type="button">履歴</button>
         </div>
@@ -39,11 +43,6 @@
         <div class="mobile-actions">
           <label class="file-button" for="audioFileInput">音声ファイルを追加</label>
           <input id="audioFileInput" class="file-input" type="file" accept="audio/*" capture>
-          <div id="phoneUrlBox" class="phone-url-box" hidden>
-            <span>スマホURL</span>
-            <code id="phoneUrlText"></code>
-            <button id="copyPhoneUrlButton" class="ghost-button compact-button" type="button">コピー</button>
-          </div>
         </div>
       </section>
 
@@ -67,7 +66,9 @@
             </div>
             <div class="selected-actions">
               <button id="copyNoteButton" class="secondary-button" type="button">ノートをコピー</button>
-              <button id="saveNoteButton" class="ghost-button" type="button">保存</button>
+              <button id="exportPdfButton" class="ghost-button" type="button">PDF出力</button>
+              <button id="exportFilesButton" class="ghost-button" type="button" hidden>ファイル書き出し</button>
+              <button id="saveNoteButton" class="ghost-button" type="button">履歴に保存</button>
             </div>
           </div>
 
@@ -131,13 +132,16 @@
     </section>
 
     <template id="recordItemTemplate">
-      <button class="record-item" type="button">
-        <span class="record-title"></span>
-        <span class="record-meta"></span>
-        <span class="record-badge"></span>
-      </button>
+      <div class="record-item">
+        <button class="record-open" type="button">
+          <span class="record-title"></span>
+          <span class="record-meta"></span>
+          <span class="record-badge"></span>
+        </button>
+        <button class="record-delete" type="button">削除</button>
+      </div>
     </template>
 
-    <script src="app.js?v=8"></script>
+    <script src="app.js?v=11"></script>
   </body>
 </html>

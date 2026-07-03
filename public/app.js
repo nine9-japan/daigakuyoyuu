@@ -2,10 +2,8 @@ const elements = {
   appStatus: document.querySelector("#appStatus"),
   titleInput: document.querySelector("#titleInput"),
   languageSelect: document.querySelector("#languageSelect"),
+  noteModeSelect: document.querySelector("#noteModeSelect"),
   audioFileInput: document.querySelector("#audioFileInput"),
-  phoneUrlBox: document.querySelector("#phoneUrlBox"),
-  phoneUrlText: document.querySelector("#phoneUrlText"),
-  copyPhoneUrlButton: document.querySelector("#copyPhoneUrlButton"),
   apiSettingsButton: document.querySelector("#apiSettingsButton"),
   apiSettingsPanel: document.querySelector("#apiSettingsPanel"),
   apiSettingsOverlay: document.querySelector("#apiSettingsOverlay"),
@@ -37,6 +35,8 @@ const elements = {
   transcriptArea: document.querySelector("#transcriptArea"),
   noteArea: document.querySelector("#noteArea"),
   copyNoteButton: document.querySelector("#copyNoteButton"),
+  exportPdfButton: document.querySelector("#exportPdfButton"),
+  exportFilesButton: document.querySelector("#exportFilesButton"),
   saveNoteButton: document.querySelector("#saveNoteButton"),
   recordItemTemplate: document.querySelector("#recordItemTemplate")
 };
@@ -55,13 +55,17 @@ const state = {
   recording: false,
   busy: false,
   aiEnabled: false,
-  phoneUrl: "",
   mode: "server",
+  appVariant: "windows",
+  historyEnabled: true,
+  exportEnabled: false,
+  storagePath: "",
   db: null,
   currentAudioObjectUrl: "",
   androidRequests: new Map(),
   usePersonalApiKey: false,
-  personalApiKey: ""
+  personalApiKey: "",
+  noteMode: "detailed"
 };
 
 const LOCAL_DB_NAME = "recording-ai-notes";
@@ -72,6 +76,7 @@ const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const PERSONAL_API_KEY_STORAGE = "recording-ai-notes.personalApiKey";
 const USE_PERSONAL_API_KEY_STORAGE = "recording-ai-notes.usePersonalApiKey";
 const HIDE_PERSONAL_API_NOTICE_STORAGE = "recording-ai-notes.hidePersonalApiNotice";
+const NOTE_MODE_STORAGE = "recording-ai-notes.noteMode";
 
 elements.startButton.addEventListener("click", startRecording);
 elements.stopButton.addEventListener("click", stopRecording);
@@ -90,9 +95,11 @@ elements.dismissPersonalApiNoticeButton.addEventListener("click", closePersonalA
 elements.personalApiNoticeOverlay.addEventListener("click", closePersonalApiNotice);
 elements.openApiSettingsFromNoticeButton.addEventListener("click", openApiSettingsFromNotice);
 elements.copyNoteButton.addEventListener("click", copyNote);
-elements.copyPhoneUrlButton.addEventListener("click", copyPhoneUrl);
+elements.exportPdfButton.addEventListener("click", exportPdf);
+elements.exportFilesButton.addEventListener("click", exportFiles);
 elements.saveNoteButton.addEventListener("click", saveCurrentNote);
 elements.noteArea.addEventListener("input", updateControls);
+elements.noteModeSelect.addEventListener("change", handleNoteModeChanged);
 
 window.onAndroidProcessComplete = (requestId, payload) => {
   const pending = state.androidRequests.get(requestId);
@@ -124,6 +131,7 @@ window.onAndroidProcessFailed = (requestId, message) => {
 init();
 
 async function init() {
+  loadNoteMode();
   loadApiSettings();
   await loadHealth();
   await refreshRecords();
@@ -131,14 +139,27 @@ async function init() {
   showPersonalApiNoticeIfNeeded();
 }
 
+function loadNoteMode() {
+  state.noteMode = normalizeNoteMode(localStorage.getItem(NOTE_MODE_STORAGE));
+  elements.noteModeSelect.value = state.noteMode;
+}
+
+function handleNoteModeChanged() {
+  state.noteMode = normalizeNoteMode(elements.noteModeSelect.value);
+  elements.noteModeSelect.value = state.noteMode;
+  localStorage.setItem(NOTE_MODE_STORAGE, state.noteMode);
+}
+
 async function loadHealth() {
   if (shouldUseStandaloneMode()) {
     state.mode = "standalone";
+    state.appVariant = hasAndroidBridge() ? "android" : "windows";
     state.aiEnabled = hasAndroidBridge();
-    state.phoneUrl = "";
+    state.historyEnabled = true;
+    state.exportEnabled = false;
+    state.storagePath = "";
     await initLocalStore();
     await cleanupLocalExpiredAudio();
-    updatePhoneUrl();
     setStatus(hasAndroidBridge() ? "スマホ単体モード" : "ローカルモード");
     return;
   }
@@ -147,15 +168,19 @@ async function loadHealth() {
     const health = await api("/api/health");
     state.mode = "server";
     state.aiEnabled = Boolean(health.aiEnabled);
-    state.phoneUrl = choosePhoneUrl(health.networkUrls || []);
-    updatePhoneUrl();
+    state.appVariant = health.appVariant || "web";
+    state.historyEnabled = Boolean(health.historyEnabled);
+    state.exportEnabled = Boolean(health.exportEnabled);
+    state.storagePath = health.storagePath || "";
   } catch {
     state.mode = "standalone";
+    state.appVariant = "windows";
     state.aiEnabled = hasAndroidBridge();
-    state.phoneUrl = "";
+    state.historyEnabled = true;
+    state.exportEnabled = false;
+    state.storagePath = "";
     await initLocalStore();
     await cleanupLocalExpiredAudio();
-    updatePhoneUrl();
     setStatus("ローカルモード");
   }
 }
@@ -213,15 +238,15 @@ async function startRecording() {
     mediaRecorder.addEventListener("stop", finalizeRecording, { once: true });
     mediaRecorder.start(1000);
 
+    setStatus("録音中");
     startTimer();
     startSpeechRecognition();
-    setStatus("録音中");
     updateControls();
     renderRecordList();
   } catch (error) {
     stopStream();
     state.recording = false;
-    setStatus(error.message || "マイクを開始できませんでした。");
+    setStatus(microphoneErrorMessage(error));
     updateControls();
   }
 }
@@ -347,7 +372,10 @@ function processRecording(id, browserTranscript) {
     return processLocalRecording(id, browserTranscript);
   }
 
-  const body = { browserTranscript };
+  const body = {
+    browserTranscript,
+    noteMode: state.noteMode
+  };
   const personalApiKey = activePersonalApiKey();
 
   if (personalApiKey) {
@@ -402,7 +430,8 @@ async function saveCurrentNote() {
       updated = await updateLocalRecording(record.id, {
         title: elements.titleInput.value,
         transcript: elements.transcriptArea.value,
-        note: elements.noteArea.value
+        note: elements.noteArea.value,
+        noteMode: state.noteMode
       });
     } else {
       updated = await api(`/api/recordings/${encodeURIComponent(record.id)}`, {
@@ -413,14 +442,15 @@ async function saveCurrentNote() {
         body: JSON.stringify({
           title: elements.titleInput.value,
           transcript: elements.transcriptArea.value,
-          note: elements.noteArea.value
+          note: elements.noteArea.value,
+          noteMode: state.noteMode
         })
       });
     }
 
     upsertRecord(updated);
     selectRecord(updated.id);
-    setStatus("保存しました");
+    setStatus("履歴に保存しました");
   } catch (error) {
     setStatus(error.message || "保存できませんでした。");
   } finally {
@@ -447,18 +477,94 @@ async function copyNote() {
   setStatus("ノートをコピーしました");
 }
 
-async function copyPhoneUrl() {
-  if (!state.phoneUrl) {
+async function exportPdf() {
+  const transcript = elements.transcriptArea.value.trim();
+  const note = elements.noteArea.value.trim();
+
+  if (!transcript && !note) {
+    setStatus("PDFにする内容が空です。");
     return;
   }
 
-  try {
-    await navigator.clipboard.writeText(state.phoneUrl);
-  } catch {
-    window.prompt("スマホURL", state.phoneUrl);
+  const record = selectedRecord();
+  const title = elements.titleInput.value.trim() || record?.title || "録音ノート";
+  const createdAt = record?.createdAt ? formatDate(record.createdAt) : formatDate(new Date().toISOString());
+
+  if (state.mode === "standalone") {
+    setStatus("PDFダウンロードはWeb版またはWindows版で使えます。");
+    return;
   }
 
-  setStatus("スマホURLをコピーしました");
+  setBusy(true);
+
+  try {
+    const response = await fetch("/api/pdf", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        title,
+        createdAt,
+        transcript,
+        note,
+        noteMode: state.noteMode
+      })
+    });
+
+    if (!response.ok) {
+      let message = "PDFを作成できませんでした。";
+
+      try {
+        const data = await response.json();
+        message = data.error || message;
+      } catch {
+        // The response was not JSON.
+      }
+
+      throw new Error(message);
+    }
+
+    const blob = await response.blob();
+    downloadBlob(blob, `${safeFileName(title)}.pdf`);
+    setStatus("PDFをダウンロードしました");
+  } catch (error) {
+    setStatus(error.message || "PDFを作成できませんでした。");
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function exportFiles() {
+  const record = selectedRecord();
+
+  if (!record || state.busy) {
+    return;
+  }
+
+  setBusy(true);
+
+  try {
+    const exported = await api(`/api/recordings/${encodeURIComponent(record.id)}/export`, {
+      method: "POST"
+    });
+    setStatus(exported.path ? `書き出しました: ${exported.path}` : "ファイルを書き出しました");
+  } catch (error) {
+    setStatus(error.message || "ファイル保存に失敗しました。");
+  } finally {
+    setBusy(false);
+  }
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function loadApiSettings() {
@@ -497,8 +603,10 @@ async function refreshApiSettingsStatus() {
     const health = await api("/api/health");
     state.mode = "server";
     state.aiEnabled = Boolean(health.aiEnabled);
-    state.phoneUrl = choosePhoneUrl(health.networkUrls || []);
-    updatePhoneUrl();
+    state.appVariant = health.appVariant || state.appVariant;
+    state.historyEnabled = Boolean(health.historyEnabled);
+    state.exportEnabled = Boolean(health.exportEnabled);
+    state.storagePath = health.storagePath || "";
   } catch {
     state.aiEnabled = false;
   }
@@ -586,6 +694,11 @@ function openApiSettingsFromNotice() {
 }
 
 function openHistory() {
+  if (!state.historyEnabled) {
+    setStatus("Web版では履歴を開けません。Windows版で確認してください。");
+    return;
+  }
+
   renderRecordList();
   elements.historyPanel.style.right = "0";
   elements.historyPanel.classList.add("is-open");
@@ -604,7 +717,7 @@ function startSpeechRecognition() {
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
   if (!Recognition) {
-    setStatus(state.aiEnabled ? "録音中" : "録音中: 文字起こし未対応");
+    setStatus(state.aiEnabled ? "録音中: 停止後にAI文字起こしします" : "録音中: AIキーがないため文字起こしできません");
     return;
   }
 
@@ -639,7 +752,7 @@ function startSpeechRecognition() {
 
   recognition.addEventListener("error", (event) => {
     if (event.error && event.error !== "no-speech") {
-      setStatus(`文字起こし: ${event.error}`);
+      setStatus(state.aiEnabled ? "録音中: 停止後にAI文字起こしします" : `文字起こし: ${event.error}`);
     }
   });
 
@@ -660,7 +773,7 @@ function startSpeechRecognition() {
   try {
     recognition.start();
   } catch {
-    setStatus(state.aiEnabled ? "録音中" : "録音中: 文字起こし未対応");
+    setStatus(state.aiEnabled ? "録音中: 停止後にAI文字起こしします" : "録音中: AIキーがないため文字起こしできません");
   }
 }
 
@@ -724,6 +837,8 @@ function renderRecordList() {
     const title = item.querySelector(".record-title");
     const meta = item.querySelector(".record-meta");
     const badge = item.querySelector(".record-badge");
+    const openButton = item.querySelector(".record-open");
+    const deleteButton = item.querySelector(".record-delete");
 
     title.textContent = record.title || "無題";
     meta.textContent = `${formatHistoryDate(record.createdAt)} / ${statusLabel(record.status)}`;
@@ -732,11 +847,49 @@ function renderRecordList() {
       : "音声削除済み";
     badge.classList.toggle("no-audio", !record.hasAudio);
     item.classList.toggle("is-selected", record.id === state.selectedId);
-    item.addEventListener("click", () => {
+    openButton.addEventListener("click", () => {
       selectRecord(record.id);
       closeHistory();
     });
+    deleteButton.addEventListener("click", () => deleteRecord(record.id));
     elements.recordList.append(item);
+  }
+}
+
+async function deleteRecord(id) {
+  const record = state.records.find((item) => item.id === id);
+
+  if (!record || state.busy) {
+    return;
+  }
+
+  if (!window.confirm(`「${record.title || "無題"}」を削除しますか？`)) {
+    return;
+  }
+
+  setBusy(true);
+
+  try {
+    if (state.mode === "standalone") {
+      await deleteLocalRecording(id);
+    } else {
+      await api(`/api/recordings/${encodeURIComponent(id)}`, {
+        method: "DELETE"
+      });
+    }
+
+    state.records = state.records.filter((item) => item.id !== id);
+
+    if (state.selectedId === id) {
+      clearSelectedRecord();
+    }
+
+    renderRecordList();
+    setStatus("履歴を削除しました");
+  } catch (error) {
+    setStatus(error.message || "削除できませんでした。");
+  } finally {
+    setBusy(false);
   }
 }
 
@@ -753,6 +906,9 @@ async function selectRecord(id) {
   elements.titleInput.value = record.title || "";
   elements.transcriptArea.value = record.transcript || "";
   elements.noteArea.value = record.note || "";
+  state.noteMode = normalizeNoteMode(record.noteMode || state.noteMode);
+  elements.noteModeSelect.value = state.noteMode;
+  localStorage.setItem(NOTE_MODE_STORAGE, state.noteMode);
 
   if (record.audioUrl) {
     clearCurrentAudioObjectUrl();
@@ -791,6 +947,7 @@ function selectedMeta(record) {
     pieces.push(`ノート: ${sourceLabel(record.noteSource)}`);
   }
 
+  pieces.push(`形式: ${noteModeLabel(record.noteMode)}`);
   pieces.push(record.hasAudio ? `音声期限: ${formatDate(record.expiresAt)}` : "音声削除済み");
 
   return pieces.join(" / ");
@@ -812,19 +969,21 @@ function selectedRecord() {
   return state.records.find((item) => item.id === state.selectedId) || null;
 }
 
-function currentTranscript() {
-  return [state.finalTranscript, state.interimTranscript].filter(Boolean).join(" ").trim();
+function clearSelectedRecord() {
+  state.selectedId = null;
+  elements.selectedTitle.textContent = "新規録音";
+  elements.selectedMeta.textContent = "音声・文字起こし・ノート";
+  elements.titleInput.value = "";
+  elements.transcriptArea.value = "";
+  elements.noteArea.value = "";
+  clearCurrentAudioObjectUrl();
+  elements.audioPlayer.hidden = true;
+  elements.audioPlayer.removeAttribute("src");
+  updateControls();
 }
 
-function updatePhoneUrl() {
-  if (!state.phoneUrl) {
-    elements.phoneUrlBox.hidden = true;
-    elements.phoneUrlText.textContent = "";
-    return;
-  }
-
-  elements.phoneUrlText.textContent = state.phoneUrl;
-  elements.phoneUrlBox.hidden = false;
+function currentTranscript() {
+  return [state.finalTranscript, state.interimTranscript].filter(Boolean).join(" ").trim();
 }
 
 function updateControls() {
@@ -833,7 +992,12 @@ function updateControls() {
   elements.audioFileInput.disabled = state.recording || state.busy;
   elements.saveNoteButton.disabled = state.recording || state.busy || !state.selectedId;
   elements.copyNoteButton.disabled = !elements.noteArea.value.trim();
-  elements.copyPhoneUrlButton.disabled = !state.phoneUrl;
+  elements.exportPdfButton.disabled =
+    state.busy || (!elements.noteArea.value.trim() && !elements.transcriptArea.value.trim());
+  elements.exportFilesButton.hidden = !state.exportEnabled;
+  elements.exportFilesButton.disabled = state.recording || state.busy || !state.selectedId;
+  elements.historyButton.disabled = !state.historyEnabled;
+  elements.historyButton.title = state.historyEnabled ? "" : "Web版では履歴を開けません";
   elements.apiSettingsStatus.textContent = apiSettingsMessage();
   elements.recordDot.classList.toggle("is-recording", state.recording);
 
@@ -865,12 +1029,22 @@ function canUseDirectRecording() {
   return hasAndroidBridge() || window.isSecureContext || isLocalHost(window.location.hostname);
 }
 
-function choosePhoneUrl(networkUrls) {
-  if (!isLocalHost(window.location.hostname)) {
-    return window.location.origin;
+function microphoneErrorMessage(error) {
+  const name = error?.name || "";
+
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return "マイクが許可されていません。アプリ画面のマイク許可をオンにして、もう一度録音してください。";
   }
 
-  return networkUrls[0] || "";
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+    return "使えるマイクが見つかりません。Windowsのマイク設定を確認してください。";
+  }
+
+  if (name === "NotReadableError" || name === "TrackStartError") {
+    return "マイクを他のアプリが使用中です。通話アプリなどを閉じてから試してください。";
+  }
+
+  return error?.message || "マイクを開始できませんでした。";
 }
 
 function isLocalHost(hostname) {
@@ -949,6 +1123,7 @@ async function createLocalRecording(audioBlob, title) {
     status: "uploaded",
     transcriptSource: null,
     noteSource: null,
+    noteMode: state.noteMode,
     processingMessage: "",
     hasAudio: true,
     audioUrl: null,
@@ -970,6 +1145,7 @@ async function processLocalRecording(id, browserTranscript) {
 
   record.status = "processing";
   record.processingMessage = "";
+  record.noteMode = normalizeNoteMode(record.noteMode || state.noteMode);
   await writeStore(db, RECORD_STORE, record);
 
   let transcript = (browserTranscript || record.transcript || "").trim();
@@ -1000,7 +1176,11 @@ async function processLocalRecording(id, browserTranscript) {
   }
 
   if (!note) {
-    note = makeStudyNote(transcript, warnings[0] || "端末内の簡易ノートを作成しました。");
+    note = makeStudyNote(
+      transcript,
+      warnings[0] || "端末内の簡易ノートを作成しました。",
+      record.noteMode
+    );
   }
 
   record.transcript = transcript;
@@ -1009,6 +1189,7 @@ async function processLocalRecording(id, browserTranscript) {
   record.processedAt = new Date().toISOString();
   record.transcriptSource = transcriptSource;
   record.noteSource = noteSource;
+  record.noteMode = normalizeNoteMode(record.noteMode || state.noteMode);
   record.processingMessage = warnings.join(" / ");
 
   await writeStore(db, RECORD_STORE, record);
@@ -1026,9 +1207,16 @@ async function updateLocalRecording(id, changes) {
   record.title = cleanTitle(changes.title) || record.title;
   record.transcript = cleanText(changes.transcript);
   record.note = cleanText(changes.note);
+  record.noteMode = normalizeNoteMode(changes.noteMode || record.noteMode);
   record.updatedAt = new Date().toISOString();
   await writeStore(db, RECORD_STORE, record);
   return record;
+}
+
+async function deleteLocalRecording(id) {
+  const db = await initLocalStore();
+  await deleteStore(db, AUDIO_STORE, id);
+  await deleteStore(db, RECORD_STORE, id);
 }
 
 async function getLocalRecords() {
@@ -1136,7 +1324,7 @@ function blobToBase64(blob) {
   });
 }
 
-function makeStudyNote(transcript, reason) {
+function makeStudyNote(transcript, reason, noteMode = "detailed") {
   const normalized = transcript.replace(/\s+/g, " ").trim();
   const sentences = normalized
     .split(/(?<=[。.!?！？])\s*/)
@@ -1144,6 +1332,25 @@ function makeStudyNote(transcript, reason) {
     .filter(Boolean);
   const points = sentences.slice(0, 6);
   const keywords = extractKeywords(normalized);
+
+  if (normalizeNoteMode(noteMode) === "simple") {
+    return [
+      "# 講義ノート",
+      "",
+      "## 要点",
+      "",
+      ...(points.length ? points.slice(0, 5).map((item) => `* ${item}`) : ["* 文字起こしを確認してください。"]),
+      "",
+      "## 重要語句",
+      "",
+      ...(keywords.length ? keywords.slice(0, 6).map((item) => `* **${item}**`) : ["* なし"]),
+      "",
+      "## まとめ",
+      "",
+      "* 主要な内容を短く整理しました。",
+      `* ${reason}`
+    ].join("\n");
+  }
 
   return [
     "# 講義ノート",
@@ -1213,6 +1420,22 @@ function cleanText(value) {
   return String(value || "").replace(/\u0000/g, "").trim().slice(0, 200000);
 }
 
+function safeFileName(value) {
+  return String(value || "録音ノート")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/\s+/g, "_")
+    .replace(/^[._\s]+|[._\s]+$/g, "")
+    .slice(0, 80) || "録音ノート";
+}
+
+function normalizeNoteMode(value) {
+  return value === "simple" ? "simple" : "detailed";
+}
+
+function noteModeLabel(value) {
+  return normalizeNoteMode(value) === "simple" ? "簡易" : "詳細";
+}
+
 function defaultTitle(date) {
   return `録音 ${formatHistoryDate(date.toISOString())}`;
 }
@@ -1235,6 +1458,67 @@ function extensionForMime(mime) {
   }
 
   return "webm";
+}
+
+function printableNoteHtml(title, createdAt, transcript, note) {
+  return `<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <title>${escapeHtml(title)}</title>
+    <style>
+      body {
+        color: #182026;
+        font-family: "Yu Gothic", "Yu Gothic UI", Meiryo, sans-serif;
+        line-height: 1.75;
+        margin: 32px;
+      }
+      h1 {
+        font-size: 24px;
+        margin: 0 0 6px;
+      }
+      .meta {
+        color: #64717d;
+        font-size: 12px;
+        margin-bottom: 24px;
+      }
+      h2 {
+        border-bottom: 1px solid #d7dee5;
+        font-size: 16px;
+        margin: 24px 0 10px;
+        padding-bottom: 6px;
+      }
+      pre {
+        font: inherit;
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      @media print {
+        body {
+          margin: 18mm;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>${escapeHtml(title)}</h1>
+    <div class="meta">${escapeHtml(createdAt)}</div>
+    <h2>AIノート</h2>
+    <pre>${escapeHtml(note || "ノートはまだありません。")}</pre>
+    <h2>文字起こし</h2>
+    <pre>${escapeHtml(transcript || "文字起こしはまだありません。")}</pre>
+  </body>
+</html>`;
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 async function api(path, options = {}) {
@@ -1273,7 +1557,7 @@ function sourceLabel(source) {
   const labels = {
     openai: "AI",
     browser: "ブラウザ",
-    local: "簡易"
+    local: "ローカル"
   };
 
   return labels[source] || source;

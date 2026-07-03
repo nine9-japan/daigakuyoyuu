@@ -403,16 +403,36 @@ textarea:focus {
   width: 100%;
   min-height: 86px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 0;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.record-open {
+  min-width: 0;
+  display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 5px;
   text-align: left;
-  background: var(--surface);
+  background: transparent;
   color: var(--ink);
   padding: 13px 14px;
 }
 
-.record-item:hover,
-.record-item.is-selected {
+.record-delete {
+  width: 64px;
+  background: transparent;
+  color: var(--danger);
+  border-left: 1px solid var(--line);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.record-open:hover,
+.record-item.is-selected .record-open,
+.record-delete:hover {
   background: var(--surface-strong);
 }
 
