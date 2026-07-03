@@ -74,6 +74,8 @@ const LOCAL_DB_VERSION = 1;
 const RECORD_STORE = "records";
 const AUDIO_STORE = "audio";
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const RECORDING_AUDIO_BITS_PER_SECOND = 24000;
+const LARGE_AUDIO_WARNING_BYTES = 90 * 1024 * 1024;
 const PERSONAL_API_KEY_STORAGE = "recording-ai-notes.personalApiKey";
 const USE_PERSONAL_API_KEY_STORAGE = "recording-ai-notes.usePersonalApiKey";
 const HIDE_PERSONAL_API_NOTICE_STORAGE = "recording-ai-notes.hidePersonalApiNotice";
@@ -211,9 +213,17 @@ async function startRecording() {
       }
     });
     const mimeType = preferredAudioMimeType();
+    const recorderOptions = {
+      audioBitsPerSecond: RECORDING_AUDIO_BITS_PER_SECOND
+    };
+
+    if (mimeType) {
+      recorderOptions.mimeType = mimeType;
+    }
+
     const mediaRecorder = new MediaRecorder(
       stream,
-      mimeType ? { mimeType } : undefined
+      recorderOptions
     );
 
     state.stream = stream;
@@ -1598,7 +1608,18 @@ function escapeHtml(value) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, options);
+  let response;
+
+  try {
+    response = await fetch(path, options);
+  } catch (error) {
+    const message =
+      options.body instanceof Blob && options.body.size > LARGE_AUDIO_WARNING_BYTES
+        ? "音声が長すぎるため送信に失敗しました。短く分けるか、新しく録音する場合はこの版で録音し直してください。"
+        : error.message || "通信に失敗しました。";
+    throw new Error(message);
+  }
+
   const text = await response.text();
   let data = {};
 

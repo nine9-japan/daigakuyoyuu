@@ -32,9 +32,10 @@ RECORDS_FILE = DATA_DIR / "recordings.json"
 RETENTION_DAYS = 7
 RETENTION = timedelta(days=RETENTION_DAYS)
 RETRY_TRANSCRIPT_DAILY_LIMIT = 3
-MAX_AUDIO_BYTES = 100 * 1024 * 1024
+MAX_AUDIO_BYTES = 512 * 1024 * 1024
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_REMOTE_AI_JSON_BYTES = 150 * 1024 * 1024
+MAX_REMOTE_AUDIO_BYTES = 24 * 1024 * 1024
 
 
 class RequestHandled(Exception):
@@ -317,7 +318,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if should_use_remote_admin(payload):
             try:
-                remote = process_with_remote_admin(record, transcript, note_mode)
+                remote = process_with_remote_admin(record, transcript, note_mode, force_transcribe=retry_transcript)
                 transcript = clean_text(remote.get("transcript") or transcript)
                 note = clean_text(remote.get("note") or "")
                 transcript_source = remote.get("transcriptSource") or "openai"
@@ -732,7 +733,7 @@ def transcribe_audio_bytes(filename: str, audio_mime: str, audio_bytes: bytes, a
     return str(response.get("text") or "")
 
 
-def process_with_remote_admin(record: dict, browser_transcript: str, note_mode: str) -> dict:
+def process_with_remote_admin(record: dict, browser_transcript: str, note_mode: str, force_transcribe: bool = False) -> dict:
     base_url = remote_admin_base()
 
     if not base_url:
@@ -746,9 +747,13 @@ def process_with_remote_admin(record: dict, browser_transcript: str, note_mode: 
     }
 
     audio_file_name = record.get("audioFileName")
-    if audio_file_name:
+    if audio_file_name and (force_transcribe or not browser_transcript):
         audio_path = AUDIO_DIR / Path(audio_file_name).name
         if audio_path.exists():
+            if audio_path.stat().st_size > MAX_REMOTE_AUDIO_BYTES:
+                raise RuntimeError(
+                    "音声が大きすぎるためAIサーバーへ送れません。短く分けるか、録音中に取れた文字起こしからノートを作成してください。"
+                )
             payload["audioBase64"] = base64.b64encode(audio_path.read_bytes()).decode("ascii")
 
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
