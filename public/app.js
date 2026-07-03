@@ -75,6 +75,7 @@ const RECORD_STORE = "records";
 const AUDIO_STORE = "audio";
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const RECORDING_AUDIO_BITS_PER_SECOND = 24000;
+const AI_TRANSCRIPTION_AUDIO_LIMIT_BYTES = 24 * 1024 * 1024;
 const LARGE_AUDIO_WARNING_BYTES = 90 * 1024 * 1024;
 const PERSONAL_API_KEY_STORAGE = "recording-ai-notes.personalApiKey";
 const USE_PERSONAL_API_KEY_STORAGE = "recording-ai-notes.usePersonalApiKey";
@@ -1036,7 +1037,8 @@ function updateControls() {
   elements.copyNoteButton.disabled = !elements.noteArea.value.trim();
   const retryRemaining =
     typeof record?.retryTranscriptRemaining === "number" ? record.retryTranscriptRemaining : 3;
-  elements.retryTranscriptButton.disabled = state.recording || state.busy || !record?.hasAudio || retryRemaining <= 0;
+  elements.retryTranscriptButton.disabled =
+    state.recording || state.busy || !record?.hasAudio || retryRemaining <= 0;
   elements.retryTranscriptButton.title = !record?.hasAudio
     ? "音声ファイルが残っていません"
     : retryRemaining <= 0

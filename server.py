@@ -823,6 +823,15 @@ def find_ffmpeg() -> str | None:
         if candidate.exists():
             return str(candidate)
 
+    try:
+        import imageio_ffmpeg
+
+        imageio_ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        if imageio_ffmpeg_path:
+            return str(imageio_ffmpeg_path)
+    except Exception:
+        pass
+
     return shutil.which("ffmpeg")
 
 
