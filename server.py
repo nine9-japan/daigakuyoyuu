@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import textwrap
@@ -36,6 +37,7 @@ MAX_AUDIO_BYTES = 512 * 1024 * 1024
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_REMOTE_AI_JSON_BYTES = 150 * 1024 * 1024
 MAX_REMOTE_AUDIO_BYTES = 24 * 1024 * 1024
+LONG_AUDIO_SEGMENT_SECONDS = 20 * 60
 
 
 class RequestHandled(Exception):
@@ -318,7 +320,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if should_use_remote_admin(payload):
             try:
-                remote = process_with_remote_admin(record, transcript, note_mode, force_transcribe=retry_transcript)
+                remote = process_with_remote_admin_v2(record, transcript, note_mode, force_transcribe=retry_transcript)
                 transcript = clean_text(remote.get("transcript") or transcript)
                 note = clean_text(remote.get("note") or "")
                 transcript_source = remote.get("transcriptSource") or "openai"
@@ -338,6 +340,7 @@ class AppHandler(BaseHTTPRequestHandler):
             record["processingMessage"] = (
                 "文字起こしが空です。OpenAI APIキーを設定するか、対応ブラウザで録音してください。"
             )
+            record["processingMessage"] = " / ".join(warnings) or "文字起こしが空です。OpenAI APIキーを設定するか、対応ブラウザで録音してください。"
             write_records(records)
             self.send_json(public_record(record), HTTPStatus.UNPROCESSABLE_ENTITY)
             return
@@ -703,6 +706,14 @@ def build_note_pdf(payload: dict) -> bytes:
 
 def transcribe_with_openai(record: dict, api_key: str) -> str:
     audio_path = AUDIO_DIR / Path(record["audioFileName"]).name
+    if audio_path.stat().st_size > MAX_REMOTE_AUDIO_BYTES:
+        return transcribe_large_audio_file(
+            audio_path,
+            record["audioFileName"],
+            record.get("audioMime") or "audio/webm",
+            api_key,
+        )
+
     return transcribe_audio_bytes(
         record["audioFileName"],
         record.get("audioMime") or "audio/webm",
@@ -712,6 +723,12 @@ def transcribe_with_openai(record: dict, api_key: str) -> str:
 
 
 def transcribe_audio_bytes(filename: str, audio_mime: str, audio_bytes: bytes, api_key: str) -> str:
+    if len(audio_bytes) > MAX_REMOTE_AUDIO_BYTES:
+        with tempfile.TemporaryDirectory(prefix="recording-notes-audio-") as temp_dir:
+            temp_path = Path(temp_dir) / (Path(filename).name or "recording.webm")
+            temp_path.write_bytes(audio_bytes)
+            return transcribe_large_audio_file(temp_path, filename, audio_mime, api_key)
+
     fields = {
         "model": os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe"),
         "response_format": "json",
@@ -731,6 +748,202 @@ def transcribe_audio_bytes(filename: str, audio_mime: str, audio_bytes: bytes, a
         content_type,
     )
     return str(response.get("text") or "")
+
+
+def transcribe_large_audio_file(audio_path: Path, filename: str, audio_mime: str, api_key: str) -> str:
+    ffmpeg_path = find_ffmpeg()
+
+    if not ffmpeg_path:
+        raise RuntimeError(
+            "長い音声の自動分割には ffmpeg.exe が必要です。ffmpeg.exe をアプリのフォルダに入れてからもう一度試してください。"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="recording-notes-segments-") as temp_dir:
+        temp_path = Path(temp_dir)
+        segment_pattern = str(temp_path / "part_%03d.mp3")
+        command = [
+            ffmpeg_path,
+            "-y",
+            "-i",
+            str(audio_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-b:a",
+            "32k",
+            "-f",
+            "segment",
+            "-segment_time",
+            str(LONG_AUDIO_SEGMENT_SECONDS),
+            "-reset_timestamps",
+            "1",
+            segment_pattern,
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=60 * 30)
+
+        if completed.returncode != 0:
+            message = clean_text(completed.stderr or completed.stdout)
+            raise RuntimeError(f"音声の自動分割に失敗しました。{message[:300]}")
+
+        segment_paths = sorted(temp_path.glob("part_*.mp3"))
+
+        if not segment_paths:
+            raise RuntimeError("音声を分割できませんでした。対応している音声形式か確認してください。")
+
+        transcripts: list[str] = []
+        total = len(segment_paths)
+
+        for index, segment_path in enumerate(segment_paths, start=1):
+            transcript = clean_text(
+                transcribe_audio_bytes(
+                    f"{Path(filename).stem or 'recording'}_part_{index:02d}.mp3",
+                    "audio/mpeg",
+                    segment_path.read_bytes(),
+                    api_key,
+                )
+            )
+
+            if transcript:
+                transcripts.append(f"[{index}/{total}] {transcript}")
+
+        return "\n\n".join(transcripts)
+
+
+def find_ffmpeg() -> str | None:
+    candidates = [
+        ROOT_DIR / "ffmpeg.exe",
+        RESOURCE_DIR / "ffmpeg.exe",
+        ROOT_DIR / "_internal" / "ffmpeg.exe",
+        RESOURCE_DIR / "_internal" / "ffmpeg.exe",
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    return shutil.which("ffmpeg")
+
+
+def process_with_remote_admin_v2(
+    record: dict,
+    browser_transcript: str,
+    note_mode: str,
+    force_transcribe: bool = False,
+) -> dict:
+    base_url = remote_admin_base()
+
+    if not base_url:
+        raise RuntimeError("ADMIN_API_BASE が未設定です。")
+
+    payload = {
+        "browserTranscript": browser_transcript,
+        "noteMode": note_mode,
+        "audioMime": record.get("audioMime") or "audio/webm",
+        "audioFileName": record.get("audioFileName") or "recording.webm",
+    }
+
+    audio_file_name = record.get("audioFileName")
+    if audio_file_name and (force_transcribe or not browser_transcript):
+        audio_path = AUDIO_DIR / Path(audio_file_name).name
+        if audio_path.exists():
+            if audio_path.stat().st_size > MAX_REMOTE_AUDIO_BYTES:
+                return process_large_audio_with_remote_admin(audio_path, record, browser_transcript, note_mode)
+            payload["audioBase64"] = base64.b64encode(audio_path.read_bytes()).decode("ascii")
+
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    response = url_json_request(f"{base_url}/api/ai/process", body, "application/json")
+
+    if not isinstance(response, dict):
+        raise RuntimeError("管理者AIサーバーの応答を読めませんでした。")
+
+    return response
+
+
+def process_large_audio_with_remote_admin(audio_path: Path, record: dict, browser_transcript: str, note_mode: str) -> dict:
+    ffmpeg_path = find_ffmpeg()
+
+    if not ffmpeg_path:
+        raise RuntimeError(
+            "長い音声の自動分割には ffmpeg.exe が必要です。ffmpeg.exe をアプリのフォルダに入れてからもう一度試してください。"
+        )
+
+    base_url = remote_admin_base()
+
+    with tempfile.TemporaryDirectory(prefix="recording-notes-remote-segments-") as temp_dir:
+        temp_path = Path(temp_dir)
+        segment_pattern = str(temp_path / "part_%03d.mp3")
+        command = [
+            ffmpeg_path,
+            "-y",
+            "-i",
+            str(audio_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-b:a",
+            "32k",
+            "-f",
+            "segment",
+            "-segment_time",
+            str(LONG_AUDIO_SEGMENT_SECONDS),
+            "-reset_timestamps",
+            "1",
+            segment_pattern,
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=60 * 30)
+
+        if completed.returncode != 0:
+            message = clean_text(completed.stderr or completed.stdout)
+            raise RuntimeError(f"音声の自動分割に失敗しました。{message[:300]}")
+
+        segment_paths = sorted(temp_path.glob("part_*.mp3"))
+
+        if not segment_paths:
+            raise RuntimeError("音声を分割できませんでした。対応している音声形式か確認してください。")
+
+        transcripts: list[str] = []
+        total = len(segment_paths)
+
+        for index, segment_path in enumerate(segment_paths, start=1):
+            chunk_payload = {
+                "browserTranscript": "",
+                "noteMode": "simple",
+                "audioMime": "audio/mpeg",
+                "audioFileName": f"{Path(record.get('audioFileName') or 'recording').stem}_part_{index:02d}.mp3",
+                "audioBase64": base64.b64encode(segment_path.read_bytes()).decode("ascii"),
+            }
+            chunk_body = json.dumps(chunk_payload, ensure_ascii=False).encode("utf-8")
+            chunk_response = url_json_request(f"{base_url}/api/ai/process", chunk_body, "application/json")
+            transcript = clean_text(chunk_response.get("transcript") if isinstance(chunk_response, dict) else "")
+
+            if transcript:
+                transcripts.append(f"[{index}/{total}] {transcript}")
+
+        transcript = clean_text("\n\n".join(transcripts) or browser_transcript)
+
+        if not transcript:
+            raise RuntimeError("分割後の文字起こしが空でした。")
+
+        summary_payload = {
+            "browserTranscript": transcript,
+            "noteMode": note_mode,
+        }
+        summary_body = json.dumps(summary_payload, ensure_ascii=False).encode("utf-8")
+        summary = url_json_request(f"{base_url}/api/ai/process", summary_body, "application/json")
+
+        if not isinstance(summary, dict):
+            raise RuntimeError("管理者AIサーバーの応答を読めませんでした。")
+
+        return {
+            "transcript": transcript,
+            "note": clean_text(summary.get("note") or ""),
+            "transcriptSource": "openai",
+            "noteSource": summary.get("noteSource") or "openai",
+        }
 
 
 def process_with_remote_admin(record: dict, browser_transcript: str, note_mode: str, force_transcribe: bool = False) -> dict:
