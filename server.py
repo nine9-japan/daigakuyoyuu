@@ -31,6 +31,7 @@ AUDIO_DIR = DATA_DIR / "recordings"
 RECORDS_FILE = DATA_DIR / "recordings.json"
 RETENTION_DAYS = 7
 RETENTION = timedelta(days=RETENTION_DAYS)
+RETRY_TRANSCRIPT_DAILY_LIMIT = 3
 MAX_AUDIO_BYTES = 100 * 1024 * 1024
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_REMOTE_AI_JSON_BYTES = 150 * 1024 * 1024
@@ -290,12 +291,23 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "録音が見つかりません。"}, HTTPStatus.NOT_FOUND)
             return
 
+        retry_transcript = bool(payload.get("retryTranscript"))
+        if retry_transcript:
+            if not record.get("audioFileName"):
+                self.send_json({"error": "音声ファイルが残っていないため、再文字起こしできません。"}, HTTPStatus.GONE)
+                return
+
+            if not consume_retry_transcript_attempt(record):
+                write_records(records)
+                self.send_json({"error": "再文字起こしは1日3回までです。明日また試してください。"}, HTTPStatus.TOO_MANY_REQUESTS)
+                return
+
         record["status"] = "processing"
         record["processingMessage"] = ""
         write_records(records)
 
         warnings: list[str] = []
-        transcript = clean_text(payload.get("browserTranscript") or record.get("transcript") or "")
+        transcript = clean_text(payload.get("browserTranscript") or ("" if retry_transcript else record.get("transcript") or ""))
         transcript_source = "browser" if transcript else None
         note_mode = clean_note_mode(payload.get("noteMode") or record.get("noteMode"))
         note = ""
@@ -1242,11 +1254,43 @@ def public_record(record: dict) -> dict:
     has_audio = bool(record.get("audioFileName"))
     safe["hasAudio"] = has_audio
     safe["audioUrl"] = f"/api/recordings/{record['id']}/audio" if has_audio else None
+    safe["retryTranscriptRemaining"] = retry_transcript_remaining(record)
     return safe
 
 
 def find_record(records: list[dict], recording_id: str) -> dict | None:
     return next((record for record in records if record.get("id") == recording_id), None)
+
+
+def retry_transcript_day_key() -> str:
+    return utc_now().astimezone(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
+
+
+def retry_transcript_remaining(record: dict) -> int:
+    usage = record.get("retryTranscriptUsage")
+    if not isinstance(usage, dict):
+        return RETRY_TRANSCRIPT_DAILY_LIMIT
+
+    count = int(usage.get(retry_transcript_day_key()) or 0)
+    return max(0, RETRY_TRANSCRIPT_DAILY_LIMIT - count)
+
+
+def consume_retry_transcript_attempt(record: dict) -> bool:
+    key = retry_transcript_day_key()
+    usage = record.get("retryTranscriptUsage")
+
+    if not isinstance(usage, dict):
+        usage = {}
+
+    count = int(usage.get(key) or 0)
+
+    if count >= RETRY_TRANSCRIPT_DAILY_LIMIT:
+        record["retryTranscriptUsage"] = usage
+        return False
+
+    usage[key] = count + 1
+    record["retryTranscriptUsage"] = usage
+    return True
 
 
 def load_env_file() -> None:

@@ -35,6 +35,7 @@ const elements = {
   transcriptArea: document.querySelector("#transcriptArea"),
   noteArea: document.querySelector("#noteArea"),
   copyNoteButton: document.querySelector("#copyNoteButton"),
+  retryTranscriptButton: document.querySelector("#retryTranscriptButton"),
   exportPdfButton: document.querySelector("#exportPdfButton"),
   exportFilesButton: document.querySelector("#exportFilesButton"),
   saveNoteButton: document.querySelector("#saveNoteButton"),
@@ -95,6 +96,7 @@ elements.dismissPersonalApiNoticeButton.addEventListener("click", closePersonalA
 elements.personalApiNoticeOverlay.addEventListener("click", closePersonalApiNotice);
 elements.openApiSettingsFromNoticeButton.addEventListener("click", openApiSettingsFromNotice);
 elements.copyNoteButton.addEventListener("click", copyNote);
+elements.retryTranscriptButton.addEventListener("click", retryTranscript);
 elements.exportPdfButton.addEventListener("click", exportPdf);
 elements.exportFilesButton.addEventListener("click", exportFiles);
 elements.saveNoteButton.addEventListener("click", saveCurrentNote);
@@ -367,14 +369,15 @@ async function handleAudioFileSelected(event) {
   }
 }
 
-function processRecording(id, browserTranscript) {
+function processRecording(id, browserTranscript, options = {}) {
   if (state.mode === "standalone") {
-    return processLocalRecording(id, browserTranscript);
+    return processLocalRecording(id, browserTranscript, options);
   }
 
   const body = {
     browserTranscript,
-    noteMode: state.noteMode
+    noteMode: state.noteMode,
+    retryTranscript: Boolean(options.retryTranscript)
   };
   const personalApiKey = activePersonalApiKey();
 
@@ -389,6 +392,34 @@ function processRecording(id, browserTranscript) {
     },
     body: JSON.stringify(body)
   });
+}
+
+async function retryTranscript() {
+  const record = selectedRecord();
+
+  if (!record || state.busy) {
+    return;
+  }
+
+  if (!record.hasAudio) {
+    setStatus("音声ファイルが残っていないため、再文字起こしできません。");
+    return;
+  }
+
+  setBusy(true);
+  setStatus("再文字起こし中...");
+
+  try {
+    const updated = await processRecording(record.id, "", { retryTranscript: true });
+    upsertRecord(updated);
+    selectRecord(updated.id);
+    setStatus("再文字起こししました。");
+  } catch (error) {
+    setStatus(error.message || "再文字起こしに失敗しました。");
+  } finally {
+    setBusy(false);
+    await refreshRecords(true);
+  }
 }
 
 async function refreshRecords(keepSelection = true) {
@@ -987,11 +1018,20 @@ function currentTranscript() {
 }
 
 function updateControls() {
+  const record = selectedRecord();
   elements.startButton.disabled = state.recording || state.busy;
   elements.stopButton.disabled = !state.recording;
   elements.audioFileInput.disabled = state.recording || state.busy;
   elements.saveNoteButton.disabled = state.recording || state.busy || !state.selectedId;
   elements.copyNoteButton.disabled = !elements.noteArea.value.trim();
+  const retryRemaining =
+    typeof record?.retryTranscriptRemaining === "number" ? record.retryTranscriptRemaining : 3;
+  elements.retryTranscriptButton.disabled = state.recording || state.busy || !record?.hasAudio || retryRemaining <= 0;
+  elements.retryTranscriptButton.title = !record?.hasAudio
+    ? "音声ファイルが残っていません"
+    : retryRemaining <= 0
+      ? "再文字起こしは1日3回までです"
+      : `同じ音声をもう一度文字起こしします。今日の残り${retryRemaining}回`;
   elements.exportPdfButton.disabled =
     state.busy || (!elements.noteArea.value.trim() && !elements.transcriptArea.value.trim());
   elements.exportFilesButton.hidden = !state.exportEnabled;
@@ -1135,7 +1175,7 @@ async function createLocalRecording(audioBlob, title) {
   return record;
 }
 
-async function processLocalRecording(id, browserTranscript) {
+async function processLocalRecording(id, browserTranscript, options = {}) {
   const db = await initLocalStore();
   const record = await readStore(db, RECORD_STORE, id);
 
@@ -1143,12 +1183,21 @@ async function processLocalRecording(id, browserTranscript) {
     throw new Error("録音が見つかりません。");
   }
 
+  if (options.retryTranscript) {
+    const retryCheck = consumeRetryAttempt(record);
+
+    if (!retryCheck.ok) {
+      await writeStore(db, RECORD_STORE, record);
+      throw new Error("再文字起こしは1日3回までです。明日また試してください。");
+    }
+  }
+
   record.status = "processing";
   record.processingMessage = "";
   record.noteMode = normalizeNoteMode(record.noteMode || state.noteMode);
   await writeStore(db, RECORD_STORE, record);
 
-  let transcript = (browserTranscript || record.transcript || "").trim();
+  let transcript = (browserTranscript || (options.retryTranscript ? "" : record.transcript || "")).trim();
   let note = "";
   let transcriptSource = transcript ? "browser" : null;
   let noteSource = "local";
@@ -1434,6 +1483,33 @@ function normalizeNoteMode(value) {
 
 function noteModeLabel(value) {
   return normalizeNoteMode(value) === "simple" ? "簡易" : "詳細";
+}
+
+function todayKey() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
+}
+
+function consumeRetryAttempt(record) {
+  const key = todayKey();
+  const usage =
+    record.retryTranscriptUsage && typeof record.retryTranscriptUsage === "object" ? record.retryTranscriptUsage : {};
+  const count = Number(usage[key] || 0);
+
+  if (count >= 3) {
+    record.retryTranscriptUsage = usage;
+    record.retryTranscriptRemaining = 0;
+    return { ok: false, count };
+  }
+
+  usage[key] = count + 1;
+  record.retryTranscriptUsage = usage;
+  record.retryTranscriptRemaining = Math.max(0, 3 - usage[key]);
+  return { ok: true, count: usage[key] };
 }
 
 function defaultTitle(date) {
