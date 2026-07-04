@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import io
 import base64
+import hashlib
+import hmac
 import mimetypes
 import os
 import ipaddress
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -38,6 +41,8 @@ MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_REMOTE_AI_JSON_BYTES = 150 * 1024 * 1024
 MAX_REMOTE_AUDIO_BYTES = 24 * 1024 * 1024
 LONG_AUDIO_SEGMENT_SECONDS = 20 * 60
+BASIC_DAILY_LIMIT = 4
+ADMIN_MENU_PASSWORD = "gugugu117"
 
 
 class RequestHandled(Exception):
@@ -222,6 +227,10 @@ class AppHandler(BaseHTTPRequestHandler):
             self.process_remote_ai()
             return
 
+        if url.path.startswith("/api/auth/"):
+            self.handle_auth_api(url)
+            return
+
         process_match = re.fullmatch(r"/api/recordings/([^/]+)/process", url.path)
         if process_match and self.command == "POST":
             self.process_recording(process_match.group(1))
@@ -320,7 +329,13 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if should_use_remote_admin(payload):
             try:
-                remote = process_with_remote_admin_v2(record, transcript, note_mode, force_transcribe=retry_transcript)
+                remote = process_with_remote_admin_v2(
+                    record,
+                    transcript,
+                    note_mode,
+                    force_transcribe=retry_transcript,
+                    session_token=self.headers.get("X-App-Session"),
+                )
                 transcript = clean_text(remote.get("transcript") or transcript)
                 note = clean_text(remote.get("note") or "")
                 transcript_source = remote.get("transcriptSource") or "openai"
@@ -373,7 +388,7 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_json(public_record(record))
 
     def process_remote_ai(self) -> None:
-        if not authorized_remote_ai_request(self.headers.get("Authorization")):
+        if not authorized_remote_ai_request(self.headers.get("Authorization"), self.headers.get("X-App-Session")):
             self.send_json({"error": "管理者AIサーバーの認証に失敗しました。"}, HTTPStatus.UNAUTHORIZED)
             return
 
@@ -460,6 +475,169 @@ class AppHandler(BaseHTTPRequestHandler):
         records = [item for item in records if item.get("id") != recording_id]
         write_records(records)
         self.send_json({"ok": True, "id": recording_id})
+
+    def handle_auth_api(self, url: parse.ParseResult) -> None:
+        if not has_supabase_config() and remote_admin_base():
+            self.proxy_remote_auth(url)
+            return
+
+        if url.path == "/api/auth/status" and self.command == "GET":
+            user_id = verify_session_token(self.headers.get("X-App-Session"))
+            settings = auth_settings()
+            self.send_json(
+                {
+                    "ok": True,
+                    "configured": has_supabase_config(),
+                    "userId": user_id,
+                    "dailyLimit": BASIC_DAILY_LIMIT,
+                    "dailyLimitDisabled": settings.get("dailyLimitDisabled", False),
+                    "remaining": usage_remaining(user_id) if user_id else 0,
+                }
+            )
+            return
+
+        if not has_supabase_config():
+            self.send_json({"error": "Supabaseが未設定です。"}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+
+        if url.path == "/api/auth/login" and self.command == "POST":
+            self.auth_login()
+            return
+        if url.path == "/api/auth/consume" and self.command == "POST":
+            self.auth_consume_usage()
+            return
+        if url.path == "/api/auth/admin/users" and self.command == "POST":
+            self.auth_admin_create_user()
+            return
+        if url.path == "/api/auth/admin/users" and self.command == "GET":
+            self.auth_admin_list_users(url)
+            return
+        if url.path == "/api/auth/admin/reset-password" and self.command == "POST":
+            self.auth_admin_reset_password()
+            return
+        if url.path == "/api/auth/admin/settings" and self.command == "POST":
+            self.auth_admin_update_settings()
+            return
+
+        self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+
+    def proxy_remote_auth(self, url: parse.ParseResult) -> None:
+        body = b""
+        content_type = self.headers.get("Content-Type") or "application/json"
+        if self.command == "POST":
+            body = self.read_body(MAX_JSON_BYTES)
+
+        remote_url = f"{remote_admin_base()}{url.path}"
+        if url.query:
+            remote_url = f"{remote_url}?{url.query}"
+
+        response = url_request_json(
+            remote_url,
+            self.command,
+            body,
+            {
+                "Content-Type": content_type,
+                "X-App-Session": self.headers.get("X-App-Session") or "",
+            },
+        )
+        self.send_json(response)
+
+    def auth_login(self) -> None:
+        payload = self.read_json(MAX_JSON_BYTES)
+        user_id = clean_login_id(payload.get("userId"))
+        password = str(payload.get("password") or "")
+
+        if not user_id or not password:
+            self.send_json({"error": "IDとパスワードを入力してください。"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        user = supabase_get_user(user_id)
+        if not user:
+            self.send_json({"error": "IDが見つかりません。"}, HTTPStatus.UNAUTHORIZED)
+            return
+
+        password_hash = str(user.get("password_hash") or "")
+        reset_required = bool(user.get("reset_required"))
+        if not password_hash or reset_required:
+            supabase_update_user(user_id, {"password_hash": password_digest(user_id, password), "reset_required": False})
+        elif not hmac.compare_digest(password_hash, password_digest(user_id, password)):
+            self.send_json({"error": "IDまたはパスワードが違います。"}, HTTPStatus.UNAUTHORIZED)
+            return
+
+        settings = auth_settings()
+        self.send_json(
+            {
+                "ok": True,
+                "userId": user_id,
+                "token": make_session_token(user_id),
+                "dailyLimit": BASIC_DAILY_LIMIT,
+                "dailyLimitDisabled": settings.get("dailyLimitDisabled", False),
+                "remaining": usage_remaining(user_id),
+            }
+        )
+
+    def auth_consume_usage(self) -> None:
+        user_id = verify_session_token(self.headers.get("X-App-Session"))
+        if not user_id:
+            self.send_json({"error": "ログインしてください。"}, HTTPStatus.UNAUTHORIZED)
+            return
+
+        if auth_settings().get("dailyLimitDisabled", False):
+            self.send_json({"ok": True, "dailyLimitDisabled": True, "remaining": BASIC_DAILY_LIMIT})
+            return
+
+        count = usage_count(user_id)
+        if count >= BASIC_DAILY_LIMIT:
+            self.send_json({"error": "本日の使用回数は上限です。"}, HTTPStatus.TOO_MANY_REQUESTS)
+            return
+
+        new_count = set_usage_count(user_id, count + 1)
+        self.send_json({"ok": True, "count": new_count, "remaining": max(0, BASIC_DAILY_LIMIT - new_count)})
+
+    def auth_admin_create_user(self) -> None:
+        payload = self.read_json(MAX_JSON_BYTES)
+        if str(payload.get("adminPassword") or "") != ADMIN_MENU_PASSWORD:
+            self.send_json({"error": "管理者パスワードが違います。"}, HTTPStatus.UNAUTHORIZED)
+            return
+
+        user_id = clean_login_id(payload.get("userId")) if payload.get("mode") == "manual" else random_login_id()
+        if not user_id:
+            self.send_json({"error": "IDを入力してください。"}, HTTPStatus.BAD_REQUEST)
+            return
+        if supabase_get_user(user_id):
+            self.send_json({"error": "このIDは既に存在します。"}, HTTPStatus.CONFLICT)
+            return
+
+        supabase_create_user(user_id)
+        self.send_json({"ok": True, "userId": user_id})
+
+    def auth_admin_list_users(self, url: parse.ParseResult) -> None:
+        admin_password = first(parse.parse_qs(url.query).get("adminPassword"))
+        if str(admin_password or "") != ADMIN_MENU_PASSWORD:
+            self.send_json({"error": "管理者パスワードが違います。"}, HTTPStatus.UNAUTHORIZED)
+            return
+        self.send_json({"ok": True, "users": supabase_list_users()})
+
+    def auth_admin_reset_password(self) -> None:
+        payload = self.read_json(MAX_JSON_BYTES)
+        if str(payload.get("adminPassword") or "") != ADMIN_MENU_PASSWORD:
+            self.send_json({"error": "管理者パスワードが違います。"}, HTTPStatus.UNAUTHORIZED)
+            return
+        user_id = clean_login_id(payload.get("userId"))
+        if not user_id or not supabase_get_user(user_id):
+            self.send_json({"error": "IDが見つかりません。"}, HTTPStatus.NOT_FOUND)
+            return
+        supabase_update_user(user_id, {"password_hash": None, "reset_required": True})
+        self.send_json({"ok": True})
+
+    def auth_admin_update_settings(self) -> None:
+        payload = self.read_json(MAX_JSON_BYTES)
+        if str(payload.get("adminPassword") or "") != ADMIN_MENU_PASSWORD:
+            self.send_json({"error": "管理者パスワードが違います。"}, HTTPStatus.UNAUTHORIZED)
+            return
+        disabled = bool(payload.get("dailyLimitDisabled"))
+        supabase_set_setting("daily_limit_disabled", "true" if disabled else "false")
+        self.send_json({"ok": True, "dailyLimitDisabled": disabled})
 
     def create_pdf(self) -> None:
         payload = self.read_json(MAX_JSON_BYTES)
@@ -840,6 +1018,7 @@ def process_with_remote_admin_v2(
     browser_transcript: str,
     note_mode: str,
     force_transcribe: bool = False,
+    session_token: str | None = None,
 ) -> dict:
     base_url = remote_admin_base()
 
@@ -858,11 +1037,22 @@ def process_with_remote_admin_v2(
         audio_path = AUDIO_DIR / Path(audio_file_name).name
         if audio_path.exists():
             if audio_path.stat().st_size > MAX_REMOTE_AUDIO_BYTES:
-                return process_large_audio_with_remote_admin(audio_path, record, browser_transcript, note_mode)
+                return process_large_audio_with_remote_admin(
+                    audio_path,
+                    record,
+                    browser_transcript,
+                    note_mode,
+                    session_token=session_token,
+                )
             payload["audioBase64"] = base64.b64encode(audio_path.read_bytes()).decode("ascii")
 
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    response = url_json_request(f"{base_url}/api/ai/process", body, "application/json")
+    response = url_json_request(
+        f"{base_url}/api/ai/process",
+        body,
+        "application/json",
+        session_token=session_token,
+    )
 
     if not isinstance(response, dict):
         raise RuntimeError("管理者AIサーバーの応答を読めませんでした。")
@@ -870,7 +1060,13 @@ def process_with_remote_admin_v2(
     return response
 
 
-def process_large_audio_with_remote_admin(audio_path: Path, record: dict, browser_transcript: str, note_mode: str) -> dict:
+def process_large_audio_with_remote_admin(
+    audio_path: Path,
+    record: dict,
+    browser_transcript: str,
+    note_mode: str,
+    session_token: str | None = None,
+) -> dict:
     ffmpeg_path = find_ffmpeg()
 
     if not ffmpeg_path:
@@ -926,7 +1122,12 @@ def process_large_audio_with_remote_admin(audio_path: Path, record: dict, browse
                 "audioBase64": base64.b64encode(segment_path.read_bytes()).decode("ascii"),
             }
             chunk_body = json.dumps(chunk_payload, ensure_ascii=False).encode("utf-8")
-            chunk_response = url_json_request(f"{base_url}/api/ai/process", chunk_body, "application/json")
+            chunk_response = url_json_request(
+                f"{base_url}/api/ai/process",
+                chunk_body,
+                "application/json",
+                session_token=session_token,
+            )
             transcript = clean_text(chunk_response.get("transcript") if isinstance(chunk_response, dict) else "")
 
             if transcript:
@@ -942,7 +1143,12 @@ def process_large_audio_with_remote_admin(audio_path: Path, record: dict, browse
             "noteMode": note_mode,
         }
         summary_body = json.dumps(summary_payload, ensure_ascii=False).encode("utf-8")
-        summary = url_json_request(f"{base_url}/api/ai/process", summary_body, "application/json")
+        summary = url_json_request(
+            f"{base_url}/api/ai/process",
+            summary_body,
+            "application/json",
+            session_token=session_token,
+        )
 
         if not isinstance(summary, dict):
             raise RuntimeError("管理者AIサーバーの応答を読めませんでした。")
@@ -1145,11 +1351,13 @@ def openai_request(url: str, api_key: str, data: bytes, content_type: str) -> di
     return json.loads(body or "{}")
 
 
-def url_json_request(url: str, data: bytes, content_type: str) -> dict:
+def url_json_request(url: str, data: bytes, content_type: str, session_token: str | None = None) -> dict:
     headers = {"Content-Type": content_type}
     token = admin_api_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if session_token:
+        headers["X-App-Session"] = session_token
 
     req = request.Request(
         url,
@@ -1546,6 +1754,181 @@ def load_env_file() -> None:
             os.environ[key] = value
 
 
+def supabase_url() -> str:
+    return os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+
+
+def supabase_service_key() -> str:
+    return os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+
+def has_supabase_config() -> bool:
+    return bool(supabase_url() and supabase_service_key())
+
+
+def supabase_request(method: str, path: str, body: dict | list | None = None, query: str = "") -> object:
+    if not has_supabase_config():
+        raise RuntimeError("Supabaseが未設定です。")
+
+    url = f"{supabase_url()}/rest/v1/{path}{query}"
+    data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req = request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={
+            "apikey": supabase_service_key(),
+            "Authorization": f"Bearer {supabase_service_key()}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        },
+    )
+
+    try:
+        with request.urlopen(req, timeout=60) as res:
+            text = res.read().decode("utf-8")
+    except error.HTTPError as exc:
+        text = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(text or exc.reason) from exc
+
+    return json.loads(text or "null")
+
+
+def supabase_get_user(user_id: str) -> dict | None:
+    query = f"?id=eq.{parse.quote(user_id)}&select=id,password_hash,reset_required,created_at"
+    rows = supabase_request("GET", "app_users", query=query)
+    return rows[0] if isinstance(rows, list) and rows else None
+
+
+def supabase_create_user(user_id: str) -> None:
+    supabase_request("POST", "app_users", {"id": user_id, "password_hash": None, "reset_required": True})
+
+
+def supabase_update_user(user_id: str, changes: dict) -> None:
+    supabase_request("PATCH", "app_users", changes, f"?id=eq.{parse.quote(user_id)}")
+
+
+def supabase_list_users() -> list[dict]:
+    rows = supabase_request("GET", "app_users", query="?select=id,reset_required,created_at&order=created_at.desc")
+    return rows if isinstance(rows, list) else []
+
+
+def supabase_setting(key: str) -> str | None:
+    rows = supabase_request("GET", "app_settings", query=f"?key=eq.{parse.quote(key)}&select=value")
+    if isinstance(rows, list) and rows:
+        return str(rows[0].get("value") or "")
+    return None
+
+
+def supabase_set_setting(key: str, value: str) -> None:
+    existing = supabase_setting(key)
+    if existing is None:
+        supabase_request("POST", "app_settings", {"key": key, "value": value})
+    else:
+        supabase_request("PATCH", "app_settings", {"value": value}, f"?key=eq.{parse.quote(key)}")
+
+
+def auth_settings() -> dict:
+    if not has_supabase_config():
+        return {"dailyLimitDisabled": False}
+    return {"dailyLimitDisabled": supabase_setting("daily_limit_disabled") == "true"}
+
+
+def password_digest(user_id: str, password: str) -> str:
+    pepper = os.environ.get("AUTH_PASSWORD_PEPPER", ADMIN_MENU_PASSWORD)
+    raw = f"{user_id}:{password}:{pepper}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def session_secret() -> bytes:
+    seed = os.environ.get("AUTH_SESSION_SECRET") or admin_api_token() or ADMIN_MENU_PASSWORD
+    return seed.encode("utf-8")
+
+
+def make_session_token(user_id: str) -> str:
+    expires = str(int(time.time()) + 60 * 60 * 24 * 30)
+    payload = f"{user_id}:{expires}"
+    signature = hmac.new(session_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}:{signature}".encode("utf-8")).decode("ascii")
+
+
+def verify_session_token(token: str | None) -> str | None:
+    try:
+        decoded = base64.urlsafe_b64decode(str(token or "").encode("ascii")).decode("utf-8")
+        user_id, expires, signature = decoded.rsplit(":", 2)
+    except Exception:
+        return None
+
+    payload = f"{user_id}:{expires}"
+    expected = hmac.new(session_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return None
+    if int(expires) < int(time.time()):
+        return None
+    return clean_login_id(user_id)
+
+
+def usage_day_key() -> str:
+    return utc_now().astimezone(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
+
+
+def usage_count(user_id: str) -> int:
+    if not user_id:
+        return 0
+    query = (
+        f"?user_id=eq.{parse.quote(user_id)}&usage_date=eq.{usage_day_key()}"
+        "&select=count"
+    )
+    rows = supabase_request("GET", "app_usage", query=query)
+    if isinstance(rows, list) and rows:
+        return int(rows[0].get("count") or 0)
+    return 0
+
+
+def set_usage_count(user_id: str, count: int) -> int:
+    query = f"?user_id=eq.{parse.quote(user_id)}&usage_date=eq.{usage_day_key()}&select=count"
+    rows = supabase_request("GET", "app_usage", query=query)
+    body = {"user_id": user_id, "usage_date": usage_day_key(), "count": count}
+    if isinstance(rows, list) and rows:
+        supabase_request("PATCH", "app_usage", {"count": count}, f"?user_id=eq.{parse.quote(user_id)}&usage_date=eq.{usage_day_key()}")
+    else:
+        supabase_request("POST", "app_usage", body)
+    return count
+
+
+def usage_remaining(user_id: str | None) -> int:
+    if not user_id:
+        return 0
+    if auth_settings().get("dailyLimitDisabled", False):
+        return BASIC_DAILY_LIMIT
+    return max(0, BASIC_DAILY_LIMIT - usage_count(user_id))
+
+
+def clean_login_id(value: object) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "", str(value or "").strip())
+    return cleaned[:40]
+
+
+def random_login_id() -> str:
+    return f"user-{secrets.token_hex(4)}"
+
+
+def url_request_json(url: str, method: str, data: bytes = b"", headers: dict | None = None) -> dict:
+    req = request.Request(url, data=data if method != "GET" else None, method=method, headers=headers or {})
+    try:
+        with request.urlopen(req, timeout=120) as res:
+            text = res.read().decode("utf-8")
+    except error.HTTPError as exc:
+        text = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(text)
+            message = parsed.get("error") or parsed.get("processingMessage") or text
+        except json.JSONDecodeError:
+            message = text
+        raise RuntimeError(message) from exc
+    return json.loads(text or "{}")
+
+
 def has_openai_key() -> bool:
     return bool(os.environ.get("OPENAI_API_KEY", "").strip())
 
@@ -1566,13 +1949,16 @@ def admin_api_token() -> str:
     return os.environ.get("ADMIN_API_TOKEN", "").strip()
 
 
-def authorized_remote_ai_request(header: str | None) -> bool:
+def authorized_remote_ai_request(header: str | None, session_header: str | None = None) -> bool:
     token = admin_api_token()
 
-    if not token:
+    if token and str(header or "").strip() == f"Bearer {token}":
         return True
 
-    return str(header or "").strip() == f"Bearer {token}"
+    if has_supabase_config() and verify_session_token(session_header):
+        return True
+
+    return not token
 
 
 def should_use_remote_admin(payload: dict) -> bool:

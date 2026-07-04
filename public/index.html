@@ -85,6 +85,23 @@
         </section>
       </main>
     </div>
+    <div id="loginOverlay" class="login-overlay">
+      <section id="loginPanel" class="login-panel" aria-label="ログイン">
+        <h2>ログイン</h2>
+        <p id="loginStatus" class="status-line">IDとパスワードを入力してください。初回ログインではここでパスワードを設定します。</p>
+        <label class="settings-field">
+          <span>ID</span>
+          <input id="loginUserIdInput" class="title-input settings-input" type="text" autocomplete="username">
+        </label>
+        <label class="settings-field">
+          <span>パスワード</span>
+          <input id="loginPasswordInput" class="title-input settings-input" type="password" autocomplete="current-password">
+        </label>
+        <div class="settings-actions">
+          <button id="loginButton" class="primary-button" type="button">ログイン</button>
+        </div>
+      </section>
+    </div>
     <div id="historyOverlay" class="history-overlay" hidden></div>
     <div id="apiSettingsOverlay" class="history-overlay" hidden></div>
     <div id="adminMenuOverlay" class="history-overlay" hidden></div>
@@ -147,6 +164,29 @@
         <div class="settings-actions">
           <label class="file-button" for="audioFileInput">音声ファイルを追加</label>
           <button id="retryTranscriptButton" class="ghost-button" type="button">再文字起こし</button>
+          <button id="logoutButton" class="ghost-button" type="button">ログアウト</button>
+        </div>
+        <div class="admin-log">
+          <div class="admin-log-heading">
+            <span>ID発行</span>
+          </div>
+          <label class="settings-field">
+            <span>手動ID</span>
+            <input id="manualUserIdInput" class="title-input settings-input" type="text" placeholder="例: student001">
+          </label>
+          <div class="settings-actions">
+            <button id="createManualUserButton" class="primary-button" type="button">手動IDを発行</button>
+            <button id="createRandomUserButton" class="ghost-button" type="button">ランダムIDを発行</button>
+          </div>
+          <label class="settings-field">
+            <span>パスワードリセットするID</span>
+            <select id="resetUserSelect" class="title-input settings-input"></select>
+          </label>
+          <div class="settings-actions">
+            <button id="resetPasswordButton" class="danger-button" type="button">パスワードリセット</button>
+            <button id="refreshUsersButton" class="ghost-button" type="button">ID一覧更新</button>
+          </div>
+          <p id="adminUserMessage" class="status-line"></p>
         </div>
         <label class="switch-row">
           <input id="disableDailyLimitInput" type="checkbox">
@@ -173,6 +213,6 @@
       </div>
     </template>
 
-    <script src="app.js?v=14"></script>
+    <script src="app.js?v=16"></script>
   </body>
 </html>

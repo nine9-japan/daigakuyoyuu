@@ -1,5 +1,12 @@
 const elements = {
   appStatus: document.querySelector("#appStatus"),
+  appShell: document.querySelector(".app-shell"),
+  loginOverlay: document.querySelector("#loginOverlay"),
+  loginPanel: document.querySelector("#loginPanel"),
+  loginStatus: document.querySelector("#loginStatus"),
+  loginUserIdInput: document.querySelector("#loginUserIdInput"),
+  loginPasswordInput: document.querySelector("#loginPasswordInput"),
+  loginButton: document.querySelector("#loginButton"),
   titleInput: document.querySelector("#titleInput"),
   languageSelect: document.querySelector("#languageSelect"),
   noteModeSelect: document.querySelector("#noteModeSelect"),
@@ -16,6 +23,14 @@ const elements = {
   errorLogList: document.querySelector("#errorLogList"),
   clearErrorLogButton: document.querySelector("#clearErrorLogButton"),
   disableDailyLimitInput: document.querySelector("#disableDailyLimitInput"),
+  manualUserIdInput: document.querySelector("#manualUserIdInput"),
+  createManualUserButton: document.querySelector("#createManualUserButton"),
+  createRandomUserButton: document.querySelector("#createRandomUserButton"),
+  resetUserSelect: document.querySelector("#resetUserSelect"),
+  resetPasswordButton: document.querySelector("#resetPasswordButton"),
+  refreshUsersButton: document.querySelector("#refreshUsersButton"),
+  adminUserMessage: document.querySelector("#adminUserMessage"),
+  logoutButton: document.querySelector("#logoutButton"),
   personalApiNoticePanel: document.querySelector("#personalApiNoticePanel"),
   personalApiNoticeOverlay: document.querySelector("#personalApiNoticeOverlay"),
   closePersonalApiNoticeButton: document.querySelector("#closePersonalApiNoticeButton"),
@@ -77,7 +92,11 @@ const state = {
   personalApiKey: "",
   noteMode: "simple",
   errorLogs: [],
-  dailyLimitDisabled: false
+  dailyLimitDisabled: false,
+  authToken: "",
+  currentUserId: "",
+  authConfigured: false,
+  authRemaining: 0
 };
 
 const APP_VERSION = "2026.07.04-admin-menu";
@@ -98,7 +117,15 @@ const NOTE_MODE_STORAGE = "recording-ai-notes.noteMode";
 const ERROR_LOG_STORAGE = "recording-ai-notes.errorLogs";
 const DAILY_USAGE_STORAGE = "recording-ai-notes.dailyUsage";
 const DAILY_LIMIT_DISABLED_STORAGE = "recording-ai-notes.dailyLimitDisabled";
+const AUTH_TOKEN_STORAGE = "recording-ai-notes.authToken";
+const AUTH_USER_STORAGE = "recording-ai-notes.authUser";
 
+elements.loginButton.addEventListener("click", login);
+elements.loginPasswordInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    login();
+  }
+});
 elements.startButton.addEventListener("click", startRecording);
 elements.stopButton.addEventListener("click", stopRecording);
 elements.audioFileInput.addEventListener("change", handleAudioFileSelected);
@@ -114,6 +141,11 @@ elements.closeAdminMenuButton.addEventListener("click", closeAdminMenu);
 elements.adminMenuOverlay.addEventListener("click", closeAdminMenu);
 elements.clearErrorLogButton.addEventListener("click", clearErrorLogs);
 elements.disableDailyLimitInput.addEventListener("change", handleDailyLimitToggle);
+elements.createManualUserButton.addEventListener("click", () => createUser("manual"));
+elements.createRandomUserButton.addEventListener("click", () => createUser("random"));
+elements.resetPasswordButton.addEventListener("click", resetSelectedPassword);
+elements.refreshUsersButton.addEventListener("click", refreshAdminUsers);
+elements.logoutButton.addEventListener("click", logout);
 elements.saveApiSettingsButton.addEventListener("click", saveApiSettings);
 elements.clearApiSettingsButton.addEventListener("click", clearApiSettings);
 elements.closePersonalApiNoticeButton.addEventListener("click", closePersonalApiNotice);
@@ -161,11 +193,14 @@ async function init() {
   loadErrorLogs();
   loadNoteMode();
   loadDailyLimitSettings();
+  loadAuthSession();
   loadApiSettings();
   elements.appVersionText.textContent = APP_VERSION;
   renderBasicUsage();
   renderErrorLogs();
   await loadHealth();
+  await refreshAuthStatus();
+  updateLoginGate();
   await refreshRecords();
   updateControls();
   showPersonalApiNoticeIfNeeded();
@@ -180,6 +215,85 @@ function handleNoteModeChanged() {
   state.noteMode = normalizeNoteMode(elements.noteModeSelect.value);
   elements.noteModeSelect.value = state.noteMode;
   localStorage.setItem(NOTE_MODE_STORAGE, state.noteMode);
+}
+
+function loadAuthSession() {
+  state.authToken = localStorage.getItem(AUTH_TOKEN_STORAGE) || "";
+  state.currentUserId = localStorage.getItem(AUTH_USER_STORAGE) || "";
+}
+
+function saveAuthSession(token, userId) {
+  state.authToken = token || "";
+  state.currentUserId = userId || "";
+  if (state.authToken && state.currentUserId) {
+    localStorage.setItem(AUTH_TOKEN_STORAGE, state.authToken);
+    localStorage.setItem(AUTH_USER_STORAGE, state.currentUserId);
+  } else {
+    localStorage.removeItem(AUTH_TOKEN_STORAGE);
+    localStorage.removeItem(AUTH_USER_STORAGE);
+  }
+}
+
+async function refreshAuthStatus() {
+  try {
+    const status = await api("/api/auth/status", { auth: true });
+    state.authConfigured = Boolean(status.configured);
+    state.currentUserId = status.userId || state.currentUserId;
+    state.dailyLimitDisabled = Boolean(status.dailyLimitDisabled);
+    state.authRemaining = Number(status.remaining || 0);
+    elements.disableDailyLimitInput.checked = state.dailyLimitDisabled;
+    renderBasicUsage();
+  } catch (error) {
+    state.authConfigured = false;
+    addErrorLog(`ログイン状態確認: ${error.message}`);
+  }
+}
+
+function updateLoginGate() {
+  const loggedIn = Boolean(state.authToken && state.currentUserId);
+  elements.loginOverlay.hidden = loggedIn;
+  elements.appShell.classList.toggle("is-locked", !loggedIn);
+  updateControls();
+}
+
+async function login() {
+  const userId = elements.loginUserIdInput.value.trim();
+  const password = elements.loginPasswordInput.value;
+
+  if (!userId || !password) {
+    elements.loginStatus.textContent = "IDとパスワードを入力してください。";
+    return;
+  }
+
+  elements.loginButton.disabled = true;
+  elements.loginStatus.textContent = "ログイン中...";
+
+  try {
+    const result = await api("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, password })
+    });
+    saveAuthSession(result.token, result.userId);
+    state.dailyLimitDisabled = Boolean(result.dailyLimitDisabled);
+    state.authRemaining = Number(result.remaining || 0);
+    elements.loginPasswordInput.value = "";
+    elements.loginStatus.textContent = "ログインしました。";
+    updateLoginGate();
+    renderBasicUsage();
+    await refreshRecords();
+  } catch (error) {
+    elements.loginStatus.textContent = error.message || "ログインできませんでした。";
+  } finally {
+    elements.loginButton.disabled = false;
+  }
+}
+
+function logout() {
+  saveAuthSession("", "");
+  closeAdminMenu();
+  updateLoginGate();
+  setStatus("ログアウトしました。");
 }
 
 async function loadHealth() {
@@ -221,6 +335,8 @@ async function startRecording() {
   if (state.recording || state.busy) {
     return;
   }
+
+  await refreshAuthStatus();
 
   if (!canUseBasicFlow()) {
     setStatus("通常ユーザーの録音・文字起こし・ノート作成は1日4回までです。管理者メニューで解除できます。");
@@ -343,7 +459,7 @@ async function finalizeRecording() {
     const processed = await processRecording(created.id, browserTranscript);
     upsertRecord(processed);
     selectRecord(processed.id);
-    incrementBasicUsage();
+    await incrementBasicUsage();
     setStatus(processed.processingMessage || "完了");
   } catch (error) {
     if (error.data?.id) {
@@ -729,6 +845,7 @@ function openAdminMenu() {
   elements.disableDailyLimitInput.checked = state.dailyLimitDisabled;
   renderBasicUsage();
   renderErrorLogs();
+  refreshAdminUsers();
   elements.adminMenuPanel.classList.add("is-open");
   elements.adminMenuPanel.setAttribute("aria-hidden", "false");
   elements.adminMenuOverlay.hidden = false;
@@ -783,12 +900,24 @@ function loadDailyLimitSettings() {
   }
 }
 
-function handleDailyLimitToggle() {
+async function handleDailyLimitToggle() {
   state.dailyLimitDisabled = elements.disableDailyLimitInput.checked;
-  localStorage.setItem(DAILY_LIMIT_DISABLED_STORAGE, state.dailyLimitDisabled ? "true" : "false");
-  setStatus(state.dailyLimitDisabled ? "通常ユーザーの1日4回制限を解除しました。" : "通常ユーザーの1日4回制限を有効にしました。");
-  renderBasicUsage();
-  updateControls();
+  try {
+    await api("/api/auth/admin/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        adminPassword: ADMIN_PASSWORD,
+        dailyLimitDisabled: state.dailyLimitDisabled
+      })
+    });
+    setStatus(state.dailyLimitDisabled ? "通常ユーザーの1日4回制限を解除しました。" : "通常ユーザーの1日4回制限を有効にしました。");
+    await refreshAuthStatus();
+  } catch (error) {
+    elements.disableDailyLimitInput.checked = !state.dailyLimitDisabled;
+    state.dailyLimitDisabled = elements.disableDailyLimitInput.checked;
+    setStatus(error.message || "制限設定を変更できませんでした。");
+  }
 }
 
 function readDailyUsage() {
@@ -801,8 +930,7 @@ function readDailyUsage() {
 }
 
 function basicUsageCount() {
-  const usage = readDailyUsage();
-  return Number(usage[todayKey()] || 0);
+  return Math.max(0, BASIC_DAILY_LIMIT - Number(state.authRemaining || 0));
 }
 
 function basicUsageRemaining() {
@@ -814,18 +942,16 @@ function basicUsageRemaining() {
 }
 
 function canUseBasicFlow() {
-  return state.dailyLimitDisabled || basicUsageCount() < BASIC_DAILY_LIMIT;
+  return Boolean(state.authToken && state.currentUserId) && (state.dailyLimitDisabled || state.authRemaining > 0);
 }
 
-function incrementBasicUsage() {
+async function incrementBasicUsage() {
   if (state.dailyLimitDisabled) {
     return;
   }
 
-  const usage = readDailyUsage();
-  const key = todayKey();
-  usage[key] = Number(usage[key] || 0) + 1;
-  localStorage.setItem(DAILY_USAGE_STORAGE, JSON.stringify(usage));
+  const result = await api("/api/auth/consume", { method: "POST" });
+  state.authRemaining = Number(result.remaining || 0);
   renderBasicUsage();
 }
 
@@ -836,7 +962,73 @@ function renderBasicUsage() {
 
   elements.basicUsageText.textContent = state.dailyLimitDisabled
     ? "制限解除中"
-    : `${basicUsageRemaining()} / ${BASIC_DAILY_LIMIT} 回`;
+    : `${state.authRemaining} / ${BASIC_DAILY_LIMIT} 回`;
+}
+
+async function createUser(mode) {
+  const body = {
+    adminPassword: ADMIN_PASSWORD,
+    mode
+  };
+
+  if (mode === "manual") {
+    body.userId = elements.manualUserIdInput.value.trim();
+  }
+
+  try {
+    const result = await api("/api/auth/admin/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    elements.adminUserMessage.textContent = `IDを発行しました: ${result.userId}`;
+    elements.manualUserIdInput.value = "";
+    await refreshAdminUsers();
+  } catch (error) {
+    elements.adminUserMessage.textContent = error.message || "IDを発行できませんでした。";
+  }
+}
+
+async function refreshAdminUsers() {
+  try {
+    const result = await api(`/api/auth/admin/users?adminPassword=${encodeURIComponent(ADMIN_PASSWORD)}`);
+    const users = Array.isArray(result.users) ? result.users : [];
+    elements.resetUserSelect.innerHTML = "";
+    for (const user of users) {
+      const option = document.createElement("option");
+      option.value = user.id;
+      option.textContent = user.reset_required ? `${user.id}（初回設定待ち）` : user.id;
+      elements.resetUserSelect.append(option);
+    }
+    if (!users.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "IDがありません";
+      elements.resetUserSelect.append(option);
+    }
+  } catch (error) {
+    elements.adminUserMessage.textContent = error.message || "ID一覧を取得できませんでした。";
+  }
+}
+
+async function resetSelectedPassword() {
+  const userId = elements.resetUserSelect.value;
+  if (!userId) {
+    elements.adminUserMessage.textContent = "IDを選択してください。";
+    return;
+  }
+
+  try {
+    await api("/api/auth/admin/reset-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ adminPassword: ADMIN_PASSWORD, userId })
+    });
+    elements.adminUserMessage.textContent = `${userId} のパスワードをリセットしました。次回ログイン時に再設定されます。`;
+    await refreshAdminUsers();
+  } catch (error) {
+    elements.adminUserMessage.textContent = error.message || "パスワードをリセットできませんでした。";
+  }
 }
 
 function renderErrorLogs() {
@@ -1225,12 +1417,15 @@ function currentTranscript() {
 function updateControls() {
   const record = selectedRecord();
   const basicLimitReached = !state.dailyLimitDisabled && basicUsageCount() >= BASIC_DAILY_LIMIT;
-  elements.startButton.disabled = state.recording || state.busy || basicLimitReached;
+  const loggedIn = Boolean(state.authToken && state.currentUserId);
+  elements.startButton.disabled = !loggedIn || state.recording || state.busy || basicLimitReached;
   elements.startButton.title = basicLimitReached
     ? "通常ユーザーの録音・文字起こし・ノート作成は1日4回までです"
+    : !loggedIn
+      ? "ログインしてください"
     : state.dailyLimitDisabled
       ? "1日4回制限は解除中です"
-      : `今日の残り${basicUsageRemaining()}回`;
+      : `今日の残り${state.authRemaining}回`;
   elements.stopButton.disabled = !state.recording;
   elements.audioFileInput.disabled = state.recording || state.busy;
   elements.saveNoteButton.disabled = state.recording || state.busy || !state.selectedId;
@@ -1801,12 +1996,18 @@ function escapeHtml(value) {
 
 async function api(path, options = {}) {
   let response;
+  const requestOptions = { ...options };
+  requestOptions.headers = { ...(options.headers || {}) };
+  if (state.authToken) {
+    requestOptions.headers["X-App-Session"] = state.authToken;
+  }
+  delete requestOptions.auth;
 
   try {
-    response = await fetch(path, options);
+    response = await fetch(path, requestOptions);
   } catch (error) {
     const message =
-      options.body instanceof Blob && options.body.size > LARGE_AUDIO_WARNING_BYTES
+      requestOptions.body instanceof Blob && requestOptions.body.size > LARGE_AUDIO_WARNING_BYTES
         ? "音声が長すぎるため送信に失敗しました。短く分けるか、新しく録音する場合はこの版で録音し直してください。"
         : error.message || "通信に失敗しました。";
     addErrorLog(message);

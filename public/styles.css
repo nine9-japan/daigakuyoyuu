@@ -61,6 +61,37 @@ button:disabled {
   padding: 24px 0 32px;
 }
 
+.app-shell.is-locked {
+  filter: blur(1px);
+  pointer-events: none;
+  user-select: none;
+}
+
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(245, 247, 248, 0.92);
+}
+
+.login-overlay[hidden] {
+  display: none;
+}
+
+.login-panel {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+
 .topbar {
   display: flex;
   align-items: flex-end;
