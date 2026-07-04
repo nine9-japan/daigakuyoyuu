@@ -211,6 +211,20 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.usage-pill {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
 .record-actions,
 .selected-actions,
 .mobile-actions {

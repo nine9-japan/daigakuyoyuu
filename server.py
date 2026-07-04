@@ -490,7 +490,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "configured": has_supabase_config(),
                     "userId": user_id,
                     "dailyLimit": BASIC_DAILY_LIMIT,
-                    "dailyLimitDisabled": settings.get("dailyLimitDisabled", False),
+                    "dailyLimitDisabled": admin_limit_disabled_for(user_id),
                     "remaining": usage_remaining(user_id) if user_id else 0,
                 }
             )
@@ -515,8 +515,14 @@ class AppHandler(BaseHTTPRequestHandler):
         if url.path == "/api/auth/admin/reset-password" and self.command == "POST":
             self.auth_admin_reset_password()
             return
+        if url.path == "/api/auth/admin/users" and self.command == "DELETE":
+            self.auth_admin_delete_user()
+            return
         if url.path == "/api/auth/admin/settings" and self.command == "POST":
             self.auth_admin_update_settings()
+            return
+        if url.path == "/api/auth/admin/usage" and self.command == "POST":
+            self.auth_admin_update_usage()
             return
 
         self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
@@ -524,7 +530,7 @@ class AppHandler(BaseHTTPRequestHandler):
     def proxy_remote_auth(self, url: parse.ParseResult) -> None:
         body = b""
         content_type = self.headers.get("Content-Type") or "application/json"
-        if self.command == "POST":
+        if self.command in {"POST", "PATCH", "DELETE"}:
             body = self.read_body(MAX_JSON_BYTES)
 
         remote_url = f"{remote_admin_base()}{url.path}"
@@ -571,7 +577,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "userId": user_id,
                 "token": make_session_token(user_id),
                 "dailyLimit": BASIC_DAILY_LIMIT,
-                "dailyLimitDisabled": settings.get("dailyLimitDisabled", False),
+                "dailyLimitDisabled": admin_limit_disabled_for(user_id),
                 "remaining": usage_remaining(user_id),
             }
         )
@@ -582,7 +588,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "ログインしてください。"}, HTTPStatus.UNAUTHORIZED)
             return
 
-        if auth_settings().get("dailyLimitDisabled", False):
+        if admin_limit_disabled_for(user_id):
             self.send_json({"ok": True, "dailyLimitDisabled": True, "remaining": BASIC_DAILY_LIMIT})
             return
 
@@ -630,6 +636,18 @@ class AppHandler(BaseHTTPRequestHandler):
         supabase_update_user(user_id, {"password_hash": None, "reset_required": True})
         self.send_json({"ok": True})
 
+    def auth_admin_delete_user(self) -> None:
+        payload = self.read_json(MAX_JSON_BYTES)
+        if str(payload.get("adminPassword") or "") != ADMIN_MENU_PASSWORD:
+            self.send_json({"error": "管理者パスワードが違います。"}, HTTPStatus.UNAUTHORIZED)
+            return
+        user_id = clean_login_id(payload.get("userId"))
+        if not user_id or not supabase_get_user(user_id):
+            self.send_json({"error": "IDが見つかりません。"}, HTTPStatus.NOT_FOUND)
+            return
+        supabase_delete_user(user_id)
+        self.send_json({"ok": True, "userId": user_id})
+
     def auth_admin_update_settings(self) -> None:
         payload = self.read_json(MAX_JSON_BYTES)
         if str(payload.get("adminPassword") or "") != ADMIN_MENU_PASSWORD:
@@ -638,6 +656,37 @@ class AppHandler(BaseHTTPRequestHandler):
         disabled = bool(payload.get("dailyLimitDisabled"))
         supabase_set_setting("daily_limit_disabled", "true" if disabled else "false")
         self.send_json({"ok": True, "dailyLimitDisabled": disabled})
+
+    def auth_admin_update_usage(self) -> None:
+        payload = self.read_json(MAX_JSON_BYTES)
+        if str(payload.get("adminPassword") or "") != ADMIN_MENU_PASSWORD:
+            self.send_json({"error": "管理者パスワードが違います。"}, HTTPStatus.UNAUTHORIZED)
+            return
+
+        user_id = clean_login_id(payload.get("userId"))
+        if not user_id or not supabase_get_user(user_id):
+            self.send_json({"error": "IDが見つかりません。"}, HTTPStatus.NOT_FOUND)
+            return
+
+        action = str(payload.get("action") or "").strip()
+        count = usage_count(user_id)
+        if action == "reset":
+            new_count = set_usage_count(user_id, 0)
+        elif action == "add":
+            amount = max(1, min(10, int(payload.get("amount") or 1)))
+            new_count = set_usage_count(user_id, max(0, count - amount))
+        else:
+            self.send_json({"error": "操作が不正です。"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        self.send_json(
+            {
+                "ok": True,
+                "userId": user_id,
+                "count": new_count,
+                "remaining": usage_remaining(user_id),
+            }
+        )
 
     def create_pdf(self) -> None:
         payload = self.read_json(MAX_JSON_BYTES)
@@ -1325,6 +1374,116 @@ def summarize_with_openai(transcript: str, api_key: str, note_mode: str = "detai
     return "\n".join(parts).strip()
 
 
+def detailed_note_rules() -> str:
+    return "\n".join(
+        [
+            "ノート形式: 詳細",
+            "文字数: 日本語で7000〜12000文字を目安にしてください。短くまとめすぎず、講義後に読み返して内容・流れ・例・先生の意図を復元できる密度にしてください。",
+            "文字起こしに情報が少ない場合だけ、無理に水増しせず本文にある内容を中心に整理してください。",
+            "",
+            "# 講義ノート（詳細版）",
+            "",
+            "※文字起こしをもとに、内容が理解しやすいように整理・補足してまとめています。",
+            "",
+            "---",
+            "",
+            "# 授業テーマ",
+            "",
+            "**授業全体の中心テーマを1文で書く**",
+            "",
+            "この講義で何を考えるのか、何を理解すべきかを説明する。",
+            "",
+            "---",
+            "",
+            "# 1. 大きな論点名",
+            "",
+            "## 背景",
+            "",
+            "* なぜその話題が出たのか",
+            "* 何と関係しているのか",
+            "* 先生が強調した問題意識",
+            "",
+            "## 具体例",
+            "",
+            "* 講義中に出た例、比喩、問いかけをできるだけ拾う",
+            "* 例は省略せず、意味が分かるように補足する",
+            "",
+            "## 重要ポイント",
+            "",
+            "* 重要語句は **太字** にする",
+            "* 定義だけでなく、なぜ重要かも書く",
+            "",
+            "---",
+            "",
+            "# 2. 次の論点名",
+            "",
+            "論点ごとに章を分け、話の順番が分かるように整理する。",
+            "",
+            "---",
+            "",
+            "# まとめ",
+            "",
+            "講義全体で最も重要なメッセージを3〜5項目で整理する。",
+            "",
+            "詳細ルール:",
+            "* 講義の流れを壊さず、話題が変わるごとに章を作る",
+            "* 重要な問いかけ、例、比喩、先生の強調点を落とさない",
+            "* ただの要約ではなく、復習ノートとして読める密度にする",
+            "* 1文だけの薄い箇条書きを連発せず、必要なところは数行で説明する",
+            "* 文字起こしが長い場合は章数を増やしてよい",
+            "* 最後に講義全体の意味・意義・試験や復習で重要な点をまとめる",
+        ]
+    )
+
+
+def summarize_with_openai(transcript: str, api_key: str, note_mode: str = "detailed") -> str:
+    mode_rules = detailed_note_rules() if note_mode == "detailed" else simple_note_rules()
+    length_rule = (
+        "詳細ノートなので、日本語で7000〜12000文字を目安にしてください。1時間以上の講義では、章を増やし、例・背景・話の流れ・重要語句・結論・意義を丁寧に残してください。短い要約で終わらせないでください。"
+        if note_mode == "detailed"
+        else "簡易ノートなので、今まで通り短めにしてください。目安は500〜1200文字です。"
+    )
+    prompt = "\n".join(
+        [
+            "次の文字起こしを、授業用の日本語ノートとして整理してください。",
+            mode_rules,
+            length_rule,
+            "",
+            "共通ルール:",
+            "* 会話調や雑談は、意味が分かる要点に変換する",
+            "* 文字起こしにない事実は推測で断定しない",
+            "* TODO形式ではなく、復習しやすい学習ノートにする",
+            "* 重要語句は **太字** にする",
+            "* 話題が複数ある場合は、必ず章を分ける",
+            "* 講義の問いかけ、例、比喩、先生が強調した点をできるだけ残す",
+            "",
+            "文字起こし:",
+            transcript,
+        ]
+    )
+    payload = json.dumps(
+        {
+            "model": os.environ.get("OPENAI_NOTE_MODEL", "gpt-4o-mini"),
+            "max_output_tokens": 14000 if note_mode == "detailed" else 2000,
+            "input": [
+                {
+                    "role": "system",
+                    "content": "あなたは講義・授業・作業メモを、読み返しやすい高密度の日本語学習ノートに整理するアシスタントです。詳細モードでは短くまとめすぎず、講義の流れと具体例を残してください。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    response = openai_request(
+        "https://api.openai.com/v1/responses",
+        api_key,
+        payload,
+        "application/json",
+    )
+    return extract_response_text(response)
+
+
 def openai_request(url: str, api_key: str, data: bytes, content_type: str) -> dict:
     req = request.Request(
         url,
@@ -1808,6 +1967,10 @@ def supabase_update_user(user_id: str, changes: dict) -> None:
     supabase_request("PATCH", "app_users", changes, f"?id=eq.{parse.quote(user_id)}")
 
 
+def supabase_delete_user(user_id: str) -> None:
+    supabase_request("DELETE", "app_users", query=f"?id=eq.{parse.quote(user_id)}")
+
+
 def supabase_list_users() -> list[dict]:
     rows = supabase_request("GET", "app_users", query="?select=id,reset_required,created_at&order=created_at.desc")
     return rows if isinstance(rows, list) else []
@@ -1832,6 +1995,10 @@ def auth_settings() -> dict:
     if not has_supabase_config():
         return {"dailyLimitDisabled": False}
     return {"dailyLimitDisabled": supabase_setting("daily_limit_disabled") == "true"}
+
+
+def admin_limit_disabled_for(user_id: str | None) -> bool:
+    return clean_login_id(user_id) == "admin" and auth_settings().get("dailyLimitDisabled", False)
 
 
 def password_digest(user_id: str, password: str) -> str:
@@ -1899,7 +2066,7 @@ def set_usage_count(user_id: str, count: int) -> int:
 def usage_remaining(user_id: str | None) -> int:
     if not user_id:
         return 0
-    if auth_settings().get("dailyLimitDisabled", False):
+    if admin_limit_disabled_for(user_id):
         return BASIC_DAILY_LIMIT
     return max(0, BASIC_DAILY_LIMIT - usage_count(user_id))
 

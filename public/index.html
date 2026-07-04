@@ -35,6 +35,7 @@
         <div class="record-state">
           <span id="recordDot" class="record-dot"></span>
           <span id="recordTimer" class="timer">00:00</span>
+          <span id="basicUsageInlineText" class="usage-pill">残り - 回</span>
           <span id="retentionText" class="retention">音声保存: 7日間</span>
         </div>
         <div class="record-actions">
@@ -186,10 +187,16 @@
             <button id="resetPasswordButton" class="danger-button" type="button">パスワードリセット</button>
             <button id="refreshUsersButton" class="ghost-button" type="button">ID一覧更新</button>
           </div>
+          <div class="settings-actions">
+            <button id="deleteUserButton" class="danger-button" type="button">ID削除</button>
+            <button id="resetUsageButton" class="ghost-button" type="button">今日の回数リセット</button>
+            <button id="addUsageButton" class="ghost-button" type="button">残り+1</button>
+          </div>
           <p id="adminUserMessage" class="status-line"></p>
         </div>
         <label class="switch-row">
           <input id="disableDailyLimitInput" type="checkbox">
+          <span>ID admin の制限解除</span>
           <span>通常ユーザーの1日4回制限を外す</span>
         </label>
         <div class="admin-log">
@@ -213,6 +220,6 @@
       </div>
     </template>
 
-    <script src="app.js?v=16"></script>
+    <script src="app.js?v=18"></script>
   </body>
 </html>

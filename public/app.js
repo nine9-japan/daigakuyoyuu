@@ -28,6 +28,9 @@ const elements = {
   createRandomUserButton: document.querySelector("#createRandomUserButton"),
   resetUserSelect: document.querySelector("#resetUserSelect"),
   resetPasswordButton: document.querySelector("#resetPasswordButton"),
+  deleteUserButton: document.querySelector("#deleteUserButton"),
+  resetUsageButton: document.querySelector("#resetUsageButton"),
+  addUsageButton: document.querySelector("#addUsageButton"),
   refreshUsersButton: document.querySelector("#refreshUsersButton"),
   adminUserMessage: document.querySelector("#adminUserMessage"),
   logoutButton: document.querySelector("#logoutButton"),
@@ -49,6 +52,7 @@ const elements = {
   closeHistoryButton: document.querySelector("#closeHistoryButton"),
   recordDot: document.querySelector("#recordDot"),
   recordTimer: document.querySelector("#recordTimer"),
+  basicUsageInlineText: document.querySelector("#basicUsageInlineText"),
   startButton: document.querySelector("#startButton"),
   stopButton: document.querySelector("#stopButton"),
   refreshButton: document.querySelector("#refreshButton"),
@@ -144,6 +148,9 @@ elements.disableDailyLimitInput.addEventListener("change", handleDailyLimitToggl
 elements.createManualUserButton.addEventListener("click", () => createUser("manual"));
 elements.createRandomUserButton.addEventListener("click", () => createUser("random"));
 elements.resetPasswordButton.addEventListener("click", resetSelectedPassword);
+elements.deleteUserButton.addEventListener("click", deleteSelectedUser);
+elements.resetUsageButton.addEventListener("click", () => updateSelectedUsage("reset"));
+elements.addUsageButton.addEventListener("click", () => updateSelectedUsage("add"));
 elements.refreshUsersButton.addEventListener("click", refreshAdminUsers);
 elements.logoutButton.addEventListener("click", logout);
 elements.saveApiSettingsButton.addEventListener("click", saveApiSettings);
@@ -1028,6 +1035,78 @@ async function resetSelectedPassword() {
     await refreshAdminUsers();
   } catch (error) {
     elements.adminUserMessage.textContent = error.message || "パスワードをリセットできませんでした。";
+  }
+}
+
+function renderBasicUsage() {
+  const text = state.dailyLimitDisabled
+    ? "制限解除中"
+    : `残り ${state.authRemaining} / ${BASIC_DAILY_LIMIT} 回`;
+
+  if (elements.basicUsageText) {
+    elements.basicUsageText.textContent = text;
+  }
+
+  if (elements.basicUsageInlineText) {
+    elements.basicUsageInlineText.textContent = text;
+  }
+}
+
+async function deleteSelectedUser() {
+  const userId = elements.resetUserSelect.value;
+  if (!userId) {
+    elements.adminUserMessage.textContent = "削除するIDを選択してください。";
+    return;
+  }
+
+  if (!confirm(`${userId} を削除します。使用回数の記録も削除されます。よろしいですか？`)) {
+    return;
+  }
+
+  try {
+    await api("/api/auth/admin/users", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ adminPassword: ADMIN_PASSWORD, userId })
+    });
+    elements.adminUserMessage.textContent = `${userId} を削除しました。`;
+    if (userId === state.currentUserId) {
+      logout();
+    }
+    await refreshAdminUsers();
+  } catch (error) {
+    elements.adminUserMessage.textContent = error.message || "IDを削除できませんでした。";
+  }
+}
+
+async function updateSelectedUsage(action) {
+  const userId = elements.resetUserSelect.value;
+  if (!userId) {
+    elements.adminUserMessage.textContent = "IDを選択してください。";
+    return;
+  }
+
+  try {
+    const result = await api("/api/auth/admin/usage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        adminPassword: ADMIN_PASSWORD,
+        userId,
+        action,
+        amount: 1
+      })
+    });
+    elements.adminUserMessage.textContent =
+      action === "reset"
+        ? `${userId} の今日の使用回数をリセットしました。残り ${result.remaining} 回です。`
+        : `${userId} の残り回数を1回増やしました。残り ${result.remaining} 回です。`;
+    if (userId === state.currentUserId) {
+      state.authRemaining = Number(result.remaining || 0);
+      renderBasicUsage();
+    }
+  } catch (error) {
+    elements.adminUserMessage.textContent = error.message || "使用回数を変更できませんでした。";
   }
 }
 
