@@ -3,238 +3,131 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>骭ｲ髻ｳ繝弱・繝・/title>
+    <title>RecordingNote</title>
     <link rel="stylesheet" href="styles.css?v=6">
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
         <div>
-          <h1>骭ｲ髻ｳ繝弱・繝・/h1>
-          <p id="appStatus" class="status-line">蠕・ｩ滉ｸｭ</p>
+          <h1>RecordingNote</h1>
+          <p id="appStatus" class="status-line">待機中</p>
         </div>
         <div class="top-actions">
-          <input id="titleInput" class="title-input" type="text" maxlength="80" placeholder="繧ｿ繧､繝医Ν">
-          <select id="languageSelect" class="select-input" aria-label="譁・ｭ苓ｵｷ縺薙＠險隱・>
-            <option value="ja-JP">譌･譛ｬ隱・/option>
+          <input id="titleInput" class="title-input" type="text" maxlength="80" placeholder="タイトル">
+          <select id="languageSelect" class="select-input" aria-label="文字起こし言語">
+            <option value="ja-JP">日本語</option>
             <option value="en-US">English</option>
-            <option value="ko-KR">﨑懋ｵｭ・ｴ</option>
-            <option value="zh-CN">荳ｭ譁・/option>
+            <option value="ko-KR">韓国語</option>
+            <option value="zh-CN">中国語</option>
           </select>
-          <select id="noteModeSelect" class="select-input" aria-label="繝弱・繝亥ｽ｢蠑・>
-            <option value="simple" selected>邁｡譏薙ヮ繝ｼ繝・/option>
-            <option value="detailed">隧ｳ邏ｰ繝弱・繝・/option>
+          <select id="noteModeSelect" class="select-input" aria-label="ノート形式">
+            <option value="simple" selected>簡易ノート</option>
+            <option value="detailed">詳細ノート</option>
           </select>
-          <button id="apiSettingsButton" class="ghost-button" type="button">API險ｭ螳・/button>
-          <button id="adminMenuButton" class="ghost-button" type="button">邂｡逅・・/button>
-          <button id="historyButton" class="ghost-button" type="button">螻･豁ｴ</button>
+          <button id="apiSettingsButton" class="ghost-button" type="button">API設定</button>
+          <button id="adminMenuButton" class="ghost-button" type="button">管理者</button>
+          <button id="historyButton" class="ghost-button" type="button">履歴</button>
         </div>
       </header>
-
-      <section class="recorder-surface" aria-label="骭ｲ髻ｳ">
+      <section class="recorder-surface" aria-label="録音">
         <div class="record-state">
           <span id="recordDot" class="record-dot"></span>
           <span id="recordTimer" class="timer">00:00</span>
-          <span id="basicUsageInlineText" class="usage-pill">谿九ｊ - 蝗・/span>
-          <span id="retentionText" class="retention">髻ｳ螢ｰ菫晏ｭ・ 7譌･髢・/span>
+          <span id="basicUsageInlineText" class="usage-pill">残り - 回</span>
+          <span id="retentionText" class="retention">音声保存: 7日間</span>
         </div>
         <div class="record-actions">
-          <button id="startButton" class="primary-button" type="button">骭ｲ髻ｳ髢句ｧ・/button>
-          <button id="stopButton" class="danger-button" type="button" disabled>蛛懈ｭ｢</button>
+          <button id="startButton" class="primary-button" type="button">録音開始</button>
+          <button id="stopButton" class="danger-button" type="button" disabled>停止</button>
         </div>
         <input id="audioFileInput" class="file-input" type="file" accept="audio/*" capture>
       </section>
-
       <main class="workspace">
-        <aside id="historyPanel" class="history-panel" aria-label="菫晏ｭ俶ｸ医∩" aria-hidden="true">
+        <aside id="historyPanel" class="history-panel" aria-label="履歴" aria-hidden="true">
           <div class="panel-heading">
-            <h2>菫晏ｭ俶ｸ医∩</h2>
+            <h2>履歴</h2>
             <div class="panel-actions">
-              <button id="refreshButton" class="ghost-button compact-button" type="button">譖ｴ譁ｰ</button>
-              <button id="closeHistoryButton" class="ghost-button compact-button" type="button">髢峨§繧・/button>
+              <button id="refreshButton" class="ghost-button compact-button" type="button">更新</button>
+              <button id="closeHistoryButton" class="ghost-button compact-button" type="button">閉じる</button>
             </div>
           </div>
           <div id="recordList" class="record-list"></div>
         </aside>
-
-        <section class="editor-panel" aria-label="繝弱・繝・>
+        <section class="editor-panel" aria-label="ノート">
           <div class="selected-header">
             <div>
-              <h2 id="selectedTitle">譁ｰ隕城鹸髻ｳ</h2>
-              <p id="selectedMeta" class="muted">髻ｳ螢ｰ繝ｻ譁・ｭ苓ｵｷ縺薙＠繝ｻ繝弱・繝・/p>
+              <h2 id="selectedTitle">新規録音</h2>
+              <p id="selectedMeta" class="muted">録音・文字起こし・AIノート</p>
             </div>
             <div class="selected-actions">
-              <button id="generateNoteButton" class="primary-button" type="button">AI繝弱・繝育函謌・/button>
-              <button id="copyNoteButton" class="secondary-button" type="button">繝弱・繝医ｒ繧ｳ繝斐・</button>
-              <button id="exportPdfButton" class="ghost-button" type="button">PDF蜃ｺ蜉・/button>
-              <button id="exportFilesButton" class="ghost-button" type="button" hidden>繝輔ぃ繧､繝ｫ譖ｸ縺榊・縺・/button>
-              <button id="saveNoteButton" class="ghost-button" type="button">螻･豁ｴ縺ｫ菫晏ｭ・/button>
+              <button id="generateNoteButton" class="primary-button" type="button">AIノート生成</button>
+              <button id="copyNoteButton" class="secondary-button" type="button">ノートをコピー</button>
+              <button id="exportPdfButton" class="ghost-button" type="button">PDF出力</button>
+              <button id="exportFilesButton" class="ghost-button" type="button" hidden>ファイル保存</button>
+              <button id="saveNoteButton" class="ghost-button" type="button">履歴に保存</button>
             </div>
           </div>
-
           <audio id="audioPlayer" class="audio-player" controls hidden></audio>
-
           <div class="text-grid">
-            <label class="text-block">
-              <span>譁・ｭ苓ｵｷ縺薙＠</span>
-              <textarea id="transcriptArea" spellcheck="true"></textarea>
-            </label>
-            <label class="text-block">
-              <span>AI繝弱・繝・/span>
-              <textarea id="noteArea" spellcheck="true"></textarea>
-            </label>
+            <label class="text-block"><span>文字起こし</span><textarea id="transcriptArea" spellcheck="true"></textarea></label>
+            <label class="text-block"><span>AIノート</span><textarea id="noteArea" spellcheck="true"></textarea></label>
           </div>
         </section>
       </main>
     </div>
     <div id="loginOverlay" class="login-overlay">
-      <section id="loginPanel" class="login-panel" aria-label="繝ｭ繧ｰ繧､繝ｳ">
-        <h2>繝ｭ繧ｰ繧､繝ｳ</h2>
-        <p id="loginStatus" class="status-line">ID縺ｨ繝代せ繝ｯ繝ｼ繝峨ｒ蜈･蜉帙＠縺ｦ縺上□縺輔＞縲ょ・蝗槭Ο繧ｰ繧､繝ｳ縺ｧ縺ｯ縺薙％縺ｧ繝代せ繝ｯ繝ｼ繝峨ｒ險ｭ螳壹＠縺ｾ縺吶・/p>
-        <label class="settings-field">
-          <span>ID</span>
-          <input id="loginUserIdInput" class="title-input settings-input" type="text" autocomplete="username">
-        </label>
-        <label class="settings-field">
-          <span>繝代せ繝ｯ繝ｼ繝・/span>
-          <input id="loginPasswordInput" class="title-input settings-input" type="password" autocomplete="current-password">
-        </label>
-        <div class="settings-actions">
-          <button id="loginButton" class="primary-button" type="button">繝ｭ繧ｰ繧､繝ｳ</button>
-        </div>
+      <section id="loginPanel" class="login-panel" aria-label="ログイン">
+        <h2>ログイン</h2>
+        <p id="loginStatus" class="status-line">IDとパスワードを入力してください。初回ログインではここでパスワードを設定します。</p>
+        <label class="settings-field"><span>ID</span><input id="loginUserIdInput" class="title-input settings-input" type="text" autocomplete="username"></label>
+        <label class="settings-field"><span>パスワード</span><input id="loginPasswordInput" class="title-input settings-input" type="password" autocomplete="current-password"></label>
+        <div class="settings-actions"><button id="loginButton" class="primary-button" type="button">ログイン</button></div>
       </section>
     </div>
     <div id="historyOverlay" class="history-overlay" hidden></div>
     <div id="apiSettingsOverlay" class="history-overlay" hidden></div>
     <div id="adminMenuOverlay" class="history-overlay" hidden></div>
     <div id="personalApiNoticeOverlay" class="history-overlay" hidden></div>
-    <section id="personalApiNoticePanel" class="settings-panel notice-panel" aria-label="蛟倶ｺｺAPI繧ｭ繝ｼ縺ｮ縺企｡倥＞" aria-hidden="true">
-      <div class="panel-heading">
-        <h2>縺企｡倥＞</h2>
-        <button id="closePersonalApiNoticeButton" class="ghost-button compact-button" type="button">髢峨§繧・/button>
-      </div>
+    <section id="personalApiNoticePanel" class="settings-panel notice-panel" aria-label="個人APIキーのお願い" aria-hidden="true">
+      <div class="panel-heading"><h2>お願い</h2><button id="closePersonalApiNoticeButton" class="ghost-button compact-button" type="button">閉じる</button></div>
       <div class="settings-body">
-        <p class="notice-copy">
-          AI譁・ｭ苓ｵｷ縺薙＠縺ｨ繝弱・繝井ｽ懈・縺ｯ縲√〒縺阪ｋ縺縺題・蛻・・API繧ｭ繝ｼ繧剃ｽｿ縺｣縺ｦ縺上□縺輔＞縲らｮ｡逅・・く繝ｼ繧ゆｽｿ縺医∪縺吶′縲∝茜逕ｨ縺碁寔荳ｭ縺吶ｋ縺ｨ邂｡逅・・・縺ｫ譁咎≡縺後°縺九ｊ縺ｾ縺吶・        </p>
-        <label class="switch-row">
-          <input id="hidePersonalApiNoticeInput" type="checkbox">
-          <span>莉雁ｾ後・陦ｨ遉ｺ縺励↑縺・/span>
-        </label>
-        <div class="settings-actions">
-          <button id="openApiSettingsFromNoticeButton" class="primary-button" type="button">API險ｭ螳壹ｒ髢九￥</button>
-          <button id="dismissPersonalApiNoticeButton" class="ghost-button" type="button">縺ゅ→縺ｧ</button>
-        </div>
+        <p class="notice-copy">文字起こしとAIノート作成は、できるだけ自分のOpenAI APIキーを使ってください。管理者キーも使えますが、利用が集中すると管理者側に料金がかかります。</p>
+        <label class="switch-row"><input id="hidePersonalApiNoticeInput" type="checkbox"><span>今後は表示しない</span></label>
+        <div class="settings-actions"><button id="openApiSettingsFromNoticeButton" class="primary-button" type="button">API設定を開く</button><button id="dismissPersonalApiNoticeButton" class="ghost-button" type="button">あとで</button></div>
       </div>
     </section>
-    <section id="apiSettingsPanel" class="settings-panel" aria-label="API險ｭ螳・ aria-hidden="true">
-      <div class="panel-heading">
-        <h2>API險ｭ螳・/h2>
-        <button id="closeApiSettingsButton" class="ghost-button compact-button" type="button">髢峨§繧・/button>
-      </div>
+    <section id="apiSettingsPanel" class="settings-panel" aria-label="API設定" aria-hidden="true">
+      <div class="panel-heading"><h2>API設定</h2><button id="closeApiSettingsButton" class="ghost-button compact-button" type="button">閉じる</button></div>
       <div class="settings-body">
-        <label class="switch-row">
-          <input id="usePersonalApiKeyInput" type="checkbox">
-          <span>閾ｪ蛻・・API繧ｭ繝ｼ繧剃ｽｿ縺・/span>
-        </label>
-        <label class="settings-field">
-          <span>蛟倶ｺｺAPI繧ｭ繝ｼ</span>
-          <input id="personalApiKeyInput" class="title-input settings-input" type="password" autocomplete="off" placeholder="sk-...">
-        </label>
-        <label class="settings-field">
-          <span>文字起こしモデル</span>
-          <select id="personalTranscribeModelSelect" class="title-input settings-input">
-            <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe</option>
-            <option value="gpt-4o-transcribe">gpt-4o-transcribe</option>
-          </select>
-        </label>
-        <label class="settings-field">
-          <span>AIノートモデル</span>
-          <select id="personalNoteModelSelect" class="title-input settings-input">
-            <option value="gpt-4o-mini">gpt-4o-mini</option>
-            <option value="gpt-4o">gpt-4o</option>
-          </select>
-        </label>
-        <div class="settings-actions">
-          <button id="saveApiSettingsButton" class="primary-button" type="button">菫晏ｭ・/button>
-          <button id="clearApiSettingsButton" class="ghost-button" type="button">蜑企勁</button>
-        </div>
-        <p id="apiSettingsStatus" class="status-line">讓呎ｺ悶〒縺ｯ邂｡逅・・・API繧ｭ繝ｼ繧剃ｽｿ縺・∪縺吶・/p>
+        <label class="switch-row"><input id="usePersonalApiKeyInput" type="checkbox"><span>自分のAPIキーを使う</span></label>
+        <label class="settings-field"><span>個人APIキー</span><input id="personalApiKeyInput" class="title-input settings-input" type="password" autocomplete="off" placeholder="sk-..."></label>
+        <label class="settings-field"><span>文字起こしモデル</span><select id="personalTranscribeModelSelect" class="title-input settings-input"><option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe</option><option value="gpt-4o-transcribe">gpt-4o-transcribe</option></select></label>
+        <label class="settings-field"><span>AIノートモデル</span><select id="personalNoteModelSelect" class="title-input settings-input"><option value="gpt-4o-mini">gpt-4o-mini</option><option value="gpt-4o">gpt-4o</option></select></label>
+        <div class="settings-actions"><button id="saveApiSettingsButton" class="primary-button" type="button">保存</button><button id="clearApiSettingsButton" class="ghost-button" type="button">削除</button></div>
+        <p id="apiSettingsStatus" class="status-line">標準では管理者APIキーを使います。</p>
       </div>
     </section>
-
-    <section id="adminMenuPanel" class="settings-panel" aria-label="邂｡逅・・Γ繝九Η繝ｼ" aria-hidden="true">
-      <div class="panel-heading">
-        <h2>邂｡逅・・Γ繝九Η繝ｼ</h2>
-        <button id="closeAdminMenuButton" class="ghost-button compact-button" type="button">髢峨§繧・/button>
-      </div>
+    <section id="adminMenuPanel" class="settings-panel" aria-label="管理者メニュー" aria-hidden="true">
+      <div class="panel-heading"><h2>管理者メニュー</h2><button id="closeAdminMenuButton" class="ghost-button compact-button" type="button">閉じる</button></div>
       <div class="settings-body">
-        <div class="admin-info-row">
-          <span>繝舌・繧ｸ繝ｧ繝ｳ</span>
-          <strong id="appVersionText">-</strong>
-        </div>
-        <div class="admin-info-row">
-          <span>騾壼ｸｸ讖溯・縺ｮ譛ｬ譌･谿九ｊ</span>
-          <strong id="basicUsageText">-</strong>
-        </div>
-        <div class="settings-actions">
-          <label class="file-button" for="audioFileInput">髻ｳ螢ｰ繝輔ぃ繧､繝ｫ繧定ｿｽ蜉</label>
-          <button id="retryTranscriptButton" class="ghost-button" type="button">蜀肴枚蟄苓ｵｷ縺薙＠</button>
-          <button id="retryNoteButton" class="ghost-button" type="button">再AIノート生成</button>
-          <button id="logoutButton" class="ghost-button" type="button">繝ｭ繧ｰ繧｢繧ｦ繝・/button>
-        </div>
+        <div class="admin-info-row"><span>バージョン</span><strong id="appVersionText">-</strong></div>
+        <div class="admin-info-row"><span>本日の残り回数</span><strong id="basicUsageText">-</strong></div>
+        <div class="settings-actions"><label class="file-button" for="audioFileInput">音声ファイルを追加</label><button id="retryTranscriptButton" class="ghost-button" type="button">再文字起こし</button><button id="retryNoteButton" class="ghost-button" type="button">再AIノート生成</button><button id="logoutButton" class="ghost-button" type="button">ログアウト</button></div>
         <div class="admin-log">
-          <div class="admin-log-heading">
-            <span>ID逋ｺ陦・/span>
-          </div>
-          <label class="settings-field">
-            <span>謇句虚ID</span>
-            <input id="manualUserIdInput" class="title-input settings-input" type="text" placeholder="萓・ student001">
-          </label>
-          <div class="settings-actions">
-            <button id="createManualUserButton" class="primary-button" type="button">謇句虚ID繧堤匱陦・/button>
-            <button id="createRandomUserButton" class="ghost-button" type="button">繝ｩ繝ｳ繝繝ID繧堤匱陦・/button>
-          </div>
-          <label class="settings-field">
-            <span>繝代せ繝ｯ繝ｼ繝峨Μ繧ｻ繝・ヨ縺吶ｋID</span>
-            <select id="resetUserSelect" class="title-input settings-input"></select>
-          </label>
-          <div class="settings-actions">
-            <button id="resetPasswordButton" class="danger-button" type="button">繝代せ繝ｯ繝ｼ繝峨Μ繧ｻ繝・ヨ</button>
-            <button id="refreshUsersButton" class="ghost-button" type="button">ID荳隕ｧ譖ｴ譁ｰ</button>
-          </div>
-          <div class="settings-actions">
-            <button id="deleteUserButton" class="danger-button" type="button">ID蜑企勁</button>
-            <button id="resetUsageButton" class="ghost-button" type="button">莉頑律縺ｮ蝗樊焚繝ｪ繧ｻ繝・ヨ</button>
-            <button id="addUsageButton" class="ghost-button" type="button">谿九ｊ+1</button>
-          </div>
+          <div class="admin-log-heading"><span>ID発行・管理</span></div>
+          <label class="settings-field"><span>手動ID</span><input id="manualUserIdInput" class="title-input settings-input" type="text" placeholder="例: student001"></label>
+          <div class="settings-actions"><button id="createManualUserButton" class="primary-button" type="button">手動IDを発行</button><button id="createRandomUserButton" class="ghost-button" type="button">ランダムIDを発行</button></div>
+          <label class="settings-field"><span>対象ID</span><select id="resetUserSelect" class="title-input settings-input"></select></label>
+          <div class="settings-actions"><button id="resetPasswordButton" class="danger-button" type="button">パスワードリセット</button><button id="refreshUsersButton" class="ghost-button" type="button">ID一覧更新</button></div>
+          <div class="settings-actions"><button id="deleteUserButton" class="danger-button" type="button">ID削除</button><button id="resetUsageButton" class="ghost-button" type="button">今日の回数リセット</button><button id="addUsageButton" class="ghost-button" type="button">残り+1</button></div>
           <p id="adminUserMessage" class="status-line"></p>
         </div>
-        <label class="switch-row">
-          <input id="disableDailyLimitInput" type="checkbox">
-          <span>ID admin 縺ｮ蛻ｶ髯占ｧ｣髯､</span>
-          <span>騾壼ｸｸ繝ｦ繝ｼ繧ｶ繝ｼ縺ｮ1譌･4蝗槫宛髯舌ｒ螟悶☆</span>
-        </label>
-        <div class="admin-log">
-          <div class="admin-log-heading">
-            <span>邁｡蜊倥↑繧ｨ繝ｩ繝ｼ繝ｭ繧ｰ</span>
-            <button id="clearErrorLogButton" class="ghost-button compact-button" type="button">豸亥悉</button>
-          </div>
-          <div id="errorLogList" class="error-log-list"></div>
-        </div>
+        <label class="switch-row"><input id="disableDailyLimitInput" type="checkbox"><span>ID admin の1日4回制限を外す</span></label>
+        <div class="admin-log"><div class="admin-log-heading"><span>簡単なエラーログ</span><button id="clearErrorLogButton" class="ghost-button compact-button" type="button">消去</button></div><div id="errorLogList" class="error-log-list"></div></div>
       </div>
     </section>
-
-    <template id="recordItemTemplate">
-      <div class="record-item">
-        <button class="record-open" type="button">
-          <span class="record-title"></span>
-          <span class="record-meta"></span>
-          <span class="record-badge"></span>
-        </button>
-        <button class="record-delete" type="button">蜑企勁</button>
-      </div>
-    </template>
-
-    <script src="app.js?v=19"></script>
+    <template id="recordItemTemplate"><div class="record-item"><button class="record-open" type="button"><span class="record-title"></span><span class="record-meta"></span><span class="record-badge"></span></button><button class="record-delete" type="button">削除</button></div></template>
+    <script src="app.js?v=20"></script>
   </body>
 </html>
