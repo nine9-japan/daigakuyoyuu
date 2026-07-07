@@ -304,6 +304,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         retry_transcript = bool(payload.get("retryTranscript"))
+        action = clean_process_action(payload.get("action"), retry_transcript)
+        transcribe_only = action == "transcribe"
+        note_only = action == "note"
         if retry_transcript:
             if not record.get("audioFileName"):
                 self.send_json({"error": "音声ファイルが残っていないため、再文字起こしできません。"}, HTTPStatus.GONE)
@@ -326,6 +329,8 @@ class AppHandler(BaseHTTPRequestHandler):
         api_key = request_api_key(payload)
         has_api_key = bool(api_key)
         key_source = "user" if clean_text(payload.get("userApiKey")) else "admin"
+        transcribe_model = clean_model_name(payload.get("transcribeModel"))
+        note_model = clean_model_name(payload.get("noteModel"))
 
         if should_use_remote_admin(payload):
             try:
@@ -334,6 +339,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     transcript,
                     note_mode,
                     force_transcribe=retry_transcript,
+                    skip_note=transcribe_only,
                     session_token=self.headers.get("X-App-Session"),
                 )
                 transcript = clean_text(remote.get("transcript") or transcript)
@@ -343,9 +349,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 key_source = "remote-admin"
             except Exception as exc:
                 warnings.append(f"管理者AIサーバー: {exc}")
-        elif has_api_key and record.get("audioFileName"):
+        elif has_api_key and record.get("audioFileName") and not note_only:
             try:
-                transcript = clean_text(transcribe_with_openai(record, api_key))
+                transcript = clean_text(transcribe_with_openai(record, api_key, model=transcribe_model))
                 transcript_source = "openai"
             except Exception as exc:
                 warnings.append(f"文字起こしAPI: {exc}")
@@ -360,13 +366,15 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json(public_record(record), HTTPStatus.UNPROCESSABLE_ENTITY)
             return
 
-        note_source = "openai" if note else "local"
+        note_source = "openai" if note else (record.get("noteSource") or "local")
 
         if note:
             pass
+        elif transcribe_only:
+            note = "" if retry_transcript else clean_text(record.get("note") or "")
         elif has_api_key:
             try:
-                note = clean_text(summarize_with_openai(transcript, api_key, note_mode))
+                note = clean_text(summarize_with_openai(transcript, api_key, note_mode, model=note_model))
                 note_source = "openai"
             except Exception as exc:
                 warnings.append(f"ノート生成API: {exc}")
@@ -377,7 +385,7 @@ class AppHandler(BaseHTTPRequestHandler):
         record["transcript"] = transcript
         record["note"] = note
         record["noteMode"] = note_mode
-        record["status"] = "ready"
+        record["status"] = "transcribed" if transcribe_only else "ready"
         record["processedAt"] = iso(utc_now())
         record["transcriptSource"] = transcript_source
         record["noteSource"] = note_source
@@ -403,13 +411,16 @@ class AppHandler(BaseHTTPRequestHandler):
         transcript_source = "browser" if transcript else None
         note_mode = clean_note_mode(payload.get("noteMode"))
         audio_base64 = clean_text(payload.get("audioBase64") or "")
+        skip_note = bool(payload.get("skipNote"))
+        transcribe_model = clean_model_name(payload.get("transcribeModel"))
+        note_model = clean_model_name(payload.get("noteModel"))
 
         if audio_base64:
             try:
                 audio_bytes = base64.b64decode(audio_base64, validate=True)
                 filename = clean_title(str(payload.get("audioFileName") or "recording.webm")) or "recording.webm"
                 audio_mime = normalize_mime(str(payload.get("audioMime") or "audio/webm"))
-                transcript = clean_text(transcribe_audio_bytes(filename, audio_mime, audio_bytes, api_key))
+                transcript = clean_text(transcribe_audio_bytes(filename, audio_mime, audio_bytes, api_key, model=transcribe_model))
                 transcript_source = "openai"
             except Exception as exc:
                 self.send_json({"error": f"文字起こしAPI: {exc}"}, HTTPStatus.UNPROCESSABLE_ENTITY)
@@ -419,8 +430,20 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "文字起こしが空です。"}, HTTPStatus.UNPROCESSABLE_ENTITY)
             return
 
+        if skip_note:
+            self.send_json(
+                {
+                    "transcript": transcript,
+                    "note": "",
+                    "noteMode": note_mode,
+                    "transcriptSource": transcript_source or "openai",
+                    "noteSource": None,
+                }
+            )
+            return
+
         try:
-            note = clean_text(summarize_with_openai(transcript, api_key, note_mode))
+            note = clean_text(summarize_with_openai(transcript, api_key, note_mode, model=note_model))
         except Exception as exc:
             self.send_json({"error": f"ノート生成API: {exc}"}, HTTPStatus.UNPROCESSABLE_ENTITY)
             return
@@ -931,7 +954,7 @@ def build_note_pdf(payload: dict) -> bytes:
     return buffer.getvalue()
 
 
-def transcribe_with_openai(record: dict, api_key: str) -> str:
+def transcribe_with_openai(record: dict, api_key: str, model: str | None = None) -> str:
     audio_path = AUDIO_DIR / Path(record["audioFileName"]).name
     if audio_path.stat().st_size > MAX_REMOTE_AUDIO_BYTES:
         return transcribe_large_audio_file(
@@ -939,6 +962,7 @@ def transcribe_with_openai(record: dict, api_key: str) -> str:
             record["audioFileName"],
             record.get("audioMime") or "audio/webm",
             api_key,
+            model=model,
         )
 
     return transcribe_audio_bytes(
@@ -946,18 +970,19 @@ def transcribe_with_openai(record: dict, api_key: str) -> str:
         record.get("audioMime") or "audio/webm",
         audio_path.read_bytes(),
         api_key,
+        model=model,
     )
 
 
-def transcribe_audio_bytes(filename: str, audio_mime: str, audio_bytes: bytes, api_key: str) -> str:
+def transcribe_audio_bytes(filename: str, audio_mime: str, audio_bytes: bytes, api_key: str, model: str | None = None) -> str:
     if len(audio_bytes) > MAX_REMOTE_AUDIO_BYTES:
         with tempfile.TemporaryDirectory(prefix="recording-notes-audio-") as temp_dir:
             temp_path = Path(temp_dir) / (Path(filename).name or "recording.webm")
             temp_path.write_bytes(audio_bytes)
-            return transcribe_large_audio_file(temp_path, filename, audio_mime, api_key)
+            return transcribe_large_audio_file(temp_path, filename, audio_mime, api_key, model=model)
 
     fields = {
-        "model": os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe"),
+        "model": clean_model_name(model) or os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe"),
         "response_format": "json",
     }
     files = {
@@ -977,7 +1002,7 @@ def transcribe_audio_bytes(filename: str, audio_mime: str, audio_bytes: bytes, a
     return str(response.get("text") or "")
 
 
-def transcribe_large_audio_file(audio_path: Path, filename: str, audio_mime: str, api_key: str) -> str:
+def transcribe_large_audio_file(audio_path: Path, filename: str, audio_mime: str, api_key: str, model: str | None = None) -> str:
     ffmpeg_path = find_ffmpeg()
 
     if not ffmpeg_path:
@@ -1029,6 +1054,7 @@ def transcribe_large_audio_file(audio_path: Path, filename: str, audio_mime: str
                     "audio/mpeg",
                     segment_path.read_bytes(),
                     api_key,
+                    model=model,
                 )
             )
 
@@ -1067,6 +1093,7 @@ def process_with_remote_admin_v2(
     browser_transcript: str,
     note_mode: str,
     force_transcribe: bool = False,
+    skip_note: bool = False,
     session_token: str | None = None,
 ) -> dict:
     base_url = remote_admin_base()
@@ -1079,6 +1106,7 @@ def process_with_remote_admin_v2(
         "noteMode": note_mode,
         "audioMime": record.get("audioMime") or "audio/webm",
         "audioFileName": record.get("audioFileName") or "recording.webm",
+        "skipNote": skip_note,
     }
 
     audio_file_name = record.get("audioFileName")
@@ -1091,6 +1119,7 @@ def process_with_remote_admin_v2(
                     record,
                     browser_transcript,
                     note_mode,
+                    skip_note=skip_note,
                     session_token=session_token,
                 )
             payload["audioBase64"] = base64.b64encode(audio_path.read_bytes()).decode("ascii")
@@ -1114,6 +1143,7 @@ def process_large_audio_with_remote_admin(
     record: dict,
     browser_transcript: str,
     note_mode: str,
+    skip_note: bool = False,
     session_token: str | None = None,
 ) -> dict:
     ffmpeg_path = find_ffmpeg()
@@ -1186,6 +1216,14 @@ def process_large_audio_with_remote_admin(
 
         if not transcript:
             raise RuntimeError("分割後の文字起こしが空でした。")
+
+        if skip_note:
+            return {
+                "transcript": transcript,
+                "note": "",
+                "transcriptSource": "openai",
+                "noteSource": None,
+            }
 
         summary_payload = {
             "browserTranscript": transcript,
@@ -1318,7 +1356,7 @@ def simple_note_rules() -> str:
     )
 
 
-def summarize_with_openai(transcript: str, api_key: str, note_mode: str = "detailed") -> str:
+def summarize_with_openai(transcript: str, api_key: str, note_mode: str = "detailed", model: str | None = None) -> str:
     mode_rules = detailed_note_rules() if note_mode == "detailed" else simple_note_rules()
     length_rule = (
         "詳細ノートなので、日本語で3000〜5000文字を目安にしてください。短くまとめすぎず、背景・流れ・重要語句・結果・意義まで丁寧に整理してください。"
@@ -1342,7 +1380,7 @@ def summarize_with_openai(transcript: str, api_key: str, note_mode: str = "detai
     )
     payload = json.dumps(
         {
-            "model": os.environ.get("OPENAI_NOTE_MODEL", "gpt-4o-mini"),
+            "model": clean_model_name(model) or os.environ.get("OPENAI_NOTE_MODEL", "gpt-4o-mini"),
             "max_output_tokens": 7000 if note_mode == "detailed" else 2000,
             "input": [
                 {
@@ -1436,7 +1474,7 @@ def detailed_note_rules() -> str:
     )
 
 
-def summarize_with_openai(transcript: str, api_key: str, note_mode: str = "detailed") -> str:
+def summarize_with_openai(transcript: str, api_key: str, note_mode: str = "detailed", model: str | None = None) -> str:
     mode_rules = detailed_note_rules() if note_mode == "detailed" else simple_note_rules()
     length_rule = (
         "詳細ノートなので、日本語で7000〜12000文字を目安にしてください。1時間以上の講義では、章を増やし、例・背景・話の流れ・重要語句・結論・意義を丁寧に残してください。短い要約で終わらせないでください。"
@@ -1463,7 +1501,7 @@ def summarize_with_openai(transcript: str, api_key: str, note_mode: str = "detai
     )
     payload = json.dumps(
         {
-            "model": os.environ.get("OPENAI_NOTE_MODEL", "gpt-4o-mini"),
+            "model": clean_model_name(model) or os.environ.get("OPENAI_NOTE_MODEL", "gpt-4o-mini"),
             "max_output_tokens": 14000 if note_mode == "detailed" else 2000,
             "input": [
                 {
@@ -2148,8 +2186,22 @@ def clean_api_key(value: object) -> str:
     return str(value or "").strip()[:300]
 
 
+def clean_model_name(value: object) -> str:
+    model = str(value or "").strip()
+    if not model:
+        return ""
+    return model if re.fullmatch(r"[A-Za-z0-9_.:-]{2,80}", model) else ""
+
+
 def clean_note_mode(value: object) -> str:
     return "simple" if str(value or "").strip().lower() == "simple" else "detailed"
+
+
+def clean_process_action(value: object, retry_transcript: bool = False) -> str:
+    if retry_transcript:
+        return "transcribe"
+    action = str(value or "").strip().lower()
+    return "note" if action in {"note", "generate-note", "generate_note"} else "transcribe"
 
 
 def register_pdf_font(pdfmetrics: object, UnicodeCIDFont: object, font_name: str) -> None:

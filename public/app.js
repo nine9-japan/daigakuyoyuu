@@ -43,6 +43,8 @@ const elements = {
   closeApiSettingsButton: document.querySelector("#closeApiSettingsButton"),
   usePersonalApiKeyInput: document.querySelector("#usePersonalApiKeyInput"),
   personalApiKeyInput: document.querySelector("#personalApiKeyInput"),
+  personalTranscribeModelSelect: document.querySelector("#personalTranscribeModelSelect"),
+  personalNoteModelSelect: document.querySelector("#personalNoteModelSelect"),
   saveApiSettingsButton: document.querySelector("#saveApiSettingsButton"),
   clearApiSettingsButton: document.querySelector("#clearApiSettingsButton"),
   apiSettingsStatus: document.querySelector("#apiSettingsStatus"),
@@ -63,7 +65,9 @@ const elements = {
   transcriptArea: document.querySelector("#transcriptArea"),
   noteArea: document.querySelector("#noteArea"),
   copyNoteButton: document.querySelector("#copyNoteButton"),
+  generateNoteButton: document.querySelector("#generateNoteButton"),
   retryTranscriptButton: document.querySelector("#retryTranscriptButton"),
+  retryNoteButton: document.querySelector("#retryNoteButton"),
   exportPdfButton: document.querySelector("#exportPdfButton"),
   exportFilesButton: document.querySelector("#exportFilesButton"),
   saveNoteButton: document.querySelector("#saveNoteButton"),
@@ -94,6 +98,8 @@ const state = {
   androidRequests: new Map(),
   usePersonalApiKey: false,
   personalApiKey: "",
+  personalTranscribeModel: "gpt-4o-mini-transcribe",
+  personalNoteModel: "gpt-4o-mini",
   noteMode: "simple",
   errorLogs: [],
   dailyLimitDisabled: false,
@@ -115,6 +121,8 @@ const RECORDING_AUDIO_BITS_PER_SECOND = 24000;
 const AI_TRANSCRIPTION_AUDIO_LIMIT_BYTES = 24 * 1024 * 1024;
 const LARGE_AUDIO_WARNING_BYTES = 90 * 1024 * 1024;
 const PERSONAL_API_KEY_STORAGE = "recording-ai-notes.personalApiKey";
+const PERSONAL_TRANSCRIBE_MODEL_STORAGE = "recording-ai-notes.personalTranscribeModel";
+const PERSONAL_NOTE_MODEL_STORAGE = "recording-ai-notes.personalNoteModel";
 const USE_PERSONAL_API_KEY_STORAGE = "recording-ai-notes.usePersonalApiKey";
 const HIDE_PERSONAL_API_NOTICE_STORAGE = "recording-ai-notes.hidePersonalApiNotice";
 const NOTE_MODE_STORAGE = "recording-ai-notes.noteMode";
@@ -160,10 +168,13 @@ elements.dismissPersonalApiNoticeButton.addEventListener("click", closePersonalA
 elements.personalApiNoticeOverlay.addEventListener("click", closePersonalApiNotice);
 elements.openApiSettingsFromNoticeButton.addEventListener("click", openApiSettingsFromNotice);
 elements.copyNoteButton.addEventListener("click", copyNote);
+elements.generateNoteButton.addEventListener("click", generateNote);
 elements.retryTranscriptButton.addEventListener("click", retryTranscript);
+elements.retryNoteButton.addEventListener("click", generateNote);
 elements.exportPdfButton.addEventListener("click", exportPdf);
 elements.exportFilesButton.addEventListener("click", exportFiles);
 elements.saveNoteButton.addEventListener("click", saveCurrentNote);
+elements.transcriptArea.addEventListener("input", updateControls);
 elements.noteArea.addEventListener("input", updateControls);
 elements.noteModeSelect.addEventListener("change", handleNoteModeChanged);
 
@@ -408,7 +419,6 @@ async function startRecording() {
 
     setStatus("録音中");
     startTimer();
-    startSpeechRecognition();
     updateControls();
     renderRecordList();
   } catch (error) {
@@ -425,7 +435,6 @@ function stopRecording() {
   }
 
   state.recording = false;
-  stopSpeechRecognition();
   stopTimer();
   updateControls();
   setStatus("録音を保存中");
@@ -442,7 +451,7 @@ function stopRecording() {
 async function finalizeRecording() {
   const mimeType = state.mediaRecorder?.mimeType || "audio/webm";
   const audioBlob = new Blob(state.chunks, { type: mimeType });
-  const browserTranscript = currentTranscript();
+  const browserTranscript = "";
 
   stopStream();
   state.mediaRecorder = null;
@@ -467,7 +476,7 @@ async function finalizeRecording() {
     upsertRecord(processed);
     selectRecord(processed.id);
     await incrementBasicUsage();
-    setStatus(processed.processingMessage || "完了");
+    setStatus(processed.processingMessage || "文字起こしが完了しました。AIノート生成を押してください。");
   } catch (error) {
     if (error.data?.id) {
       upsertRecord(error.data);
@@ -527,7 +536,7 @@ async function handleAudioFileSelected(event) {
     const processed = await processRecording(created.id, "");
     upsertRecord(processed);
     selectRecord(processed.id);
-    setStatus(processed.processingMessage || "完了");
+    setStatus(processed.processingMessage || "文字起こしが完了しました。AIノート生成を押してください。");
   } catch (error) {
     if (error.data?.id) {
       upsertRecord(error.data);
@@ -550,12 +559,15 @@ function processRecording(id, browserTranscript, options = {}) {
   const body = {
     browserTranscript,
     noteMode: state.noteMode,
+    action: options.action || (options.generateNote ? "note" : "transcribe"),
     retryTranscript: Boolean(options.retryTranscript)
   };
   const personalApiKey = activePersonalApiKey();
 
   if (personalApiKey) {
     body.userApiKey = personalApiKey;
+    body.transcribeModel = state.personalTranscribeModel;
+    body.noteModel = state.personalNoteModel;
   }
 
   return api(`/api/recordings/${encodeURIComponent(id)}/process`, {
@@ -594,6 +606,40 @@ async function retryTranscript() {
     setStatus("再文字起こししました。");
   } catch (error) {
     setStatus(error.message || "再文字起こしに失敗しました。");
+  } finally {
+    setBusy(false);
+    await refreshRecords(true);
+  }
+}
+
+async function generateNote() {
+  const record = selectedRecord();
+
+  if (!record || state.busy) {
+    return;
+  }
+
+  const transcript = elements.transcriptArea.value.trim() || record.transcript || "";
+  if (!transcript.trim()) {
+    setStatus("先に文字起こしをしてください。");
+    return;
+  }
+
+  setBusy(true);
+  setStatus("AIノート生成中...");
+
+  try {
+    let updated;
+    if (state.mode === "standalone") {
+      updated = await processLocalRecording(record.id, transcript, { action: "note", generateNote: true });
+    } else {
+      updated = await processRecording(record.id, transcript, { action: "note", generateNote: true });
+    }
+    upsertRecord(updated);
+    selectRecord(updated.id);
+    setStatus(updated.processingMessage || "AIノートを生成しました。");
+  } catch (error) {
+    setStatus(error.message || "AIノート生成に失敗しました。");
   } finally {
     setBusy(false);
     await refreshRecords(true);
@@ -778,6 +824,9 @@ function downloadBlob(blob, filename) {
 
 function loadApiSettings() {
   state.personalApiKey = localStorage.getItem(PERSONAL_API_KEY_STORAGE) || "";
+  state.personalTranscribeModel =
+    localStorage.getItem(PERSONAL_TRANSCRIBE_MODEL_STORAGE) || "gpt-4o-mini-transcribe";
+  state.personalNoteModel = localStorage.getItem(PERSONAL_NOTE_MODEL_STORAGE) || "gpt-4o-mini";
   state.usePersonalApiKey =
     localStorage.getItem(USE_PERSONAL_API_KEY_STORAGE) === "true" && Boolean(state.personalApiKey);
   syncApiSettingsFields();
@@ -786,6 +835,8 @@ function loadApiSettings() {
 function syncApiSettingsFields() {
   elements.usePersonalApiKeyInput.checked = state.usePersonalApiKey;
   elements.personalApiKeyInput.value = state.personalApiKey;
+  elements.personalTranscribeModelSelect.value = state.personalTranscribeModel;
+  elements.personalNoteModelSelect.value = state.personalNoteModel;
   elements.apiSettingsStatus.textContent = apiSettingsMessage();
 }
 
@@ -1110,6 +1161,25 @@ async function updateSelectedUsage(action) {
   }
 }
 
+function openAdminMenu() {
+  if (state.currentUserId !== "admin") {
+    const password = window.prompt("管理者パスワードを入力してください。");
+    if (password !== ADMIN_PASSWORD) {
+      setStatus("管理者パスワードが違います。");
+      addErrorLog("管理者メニュー: パスワード認証に失敗しました。");
+      return;
+    }
+  }
+
+  elements.disableDailyLimitInput.checked = state.dailyLimitDisabled;
+  renderBasicUsage();
+  renderErrorLogs();
+  refreshAdminUsers();
+  elements.adminMenuPanel.classList.add("is-open");
+  elements.adminMenuPanel.setAttribute("aria-hidden", "false");
+  elements.adminMenuOverlay.hidden = false;
+}
+
 function renderErrorLogs() {
   if (!elements.errorLogList) {
     return;
@@ -1149,7 +1219,11 @@ function saveApiSettings() {
 
   state.usePersonalApiKey = usePersonal;
   state.personalApiKey = apiKey;
+  state.personalTranscribeModel = elements.personalTranscribeModelSelect.value || "gpt-4o-mini-transcribe";
+  state.personalNoteModel = elements.personalNoteModelSelect.value || "gpt-4o-mini";
   localStorage.setItem(USE_PERSONAL_API_KEY_STORAGE, String(usePersonal));
+  localStorage.setItem(PERSONAL_TRANSCRIBE_MODEL_STORAGE, state.personalTranscribeModel);
+  localStorage.setItem(PERSONAL_NOTE_MODEL_STORAGE, state.personalNoteModel);
 
   if (apiKey) {
     localStorage.setItem(PERSONAL_API_KEY_STORAGE, apiKey);
@@ -1165,8 +1239,12 @@ function saveApiSettings() {
 function clearApiSettings() {
   state.usePersonalApiKey = false;
   state.personalApiKey = "";
+  state.personalTranscribeModel = "gpt-4o-mini-transcribe";
+  state.personalNoteModel = "gpt-4o-mini";
   localStorage.removeItem(USE_PERSONAL_API_KEY_STORAGE);
   localStorage.removeItem(PERSONAL_API_KEY_STORAGE);
+  localStorage.removeItem(PERSONAL_TRANSCRIBE_MODEL_STORAGE);
+  localStorage.removeItem(PERSONAL_NOTE_MODEL_STORAGE);
   localStorage.removeItem(HIDE_PERSONAL_API_NOTICE_STORAGE);
   syncApiSettingsFields();
   setStatus("管理者APIキーを使います");
@@ -1509,7 +1587,11 @@ function updateControls() {
   elements.audioFileInput.disabled = state.recording || state.busy;
   elements.saveNoteButton.disabled = state.recording || state.busy || !state.selectedId;
   elements.copyNoteButton.disabled = !elements.noteArea.value.trim();
+  elements.generateNoteButton.disabled =
+    state.recording || state.busy || !state.selectedId || !elements.transcriptArea.value.trim();
   elements.retryTranscriptButton.disabled = state.recording || state.busy || !record?.hasAudio;
+  elements.retryNoteButton.disabled =
+    state.recording || state.busy || !record || !(elements.transcriptArea.value.trim() || record.transcript);
   elements.retryTranscriptButton.title = !record?.hasAudio
     ? "音声ファイルが残っていません"
     : "管理者メニューから同じ音声をもう一度文字起こしします";
@@ -1677,6 +1759,7 @@ async function processLocalRecording(id, browserTranscript, options = {}) {
   let note = "";
   let transcriptSource = transcript ? "browser" : null;
   let noteSource = "local";
+  const action = options.action || (options.generateNote ? "note" : "transcribe");
   const warnings = [];
 
   if (hasAndroidBridge() && record.hasAudio) {
@@ -1700,7 +1783,9 @@ async function processLocalRecording(id, browserTranscript, options = {}) {
     return record;
   }
 
-  if (!note) {
+  if (action === "transcribe") {
+    note = options.retryTranscript ? "" : (record.note || "");
+  } else if (!note) {
     note = makeStudyNote(
       transcript,
       warnings[0] || "端末内の簡易ノートを作成しました。",
@@ -1710,7 +1795,7 @@ async function processLocalRecording(id, browserTranscript, options = {}) {
 
   record.transcript = transcript;
   record.note = note;
-  record.status = "ready";
+  record.status = action === "transcribe" ? "transcribed" : "ready";
   record.processedAt = new Date().toISOString();
   record.transcriptSource = transcriptSource;
   record.noteSource = noteSource;
